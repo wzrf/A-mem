@@ -1,0 +1,72 @@
+{
+    "system_prompt":{
+        "Qwen1.5":{
+            "hotpotqa": "<|im_start|>system\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "2wikimqa": "<|im_start|>system\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "musique": "<|im_start|>system\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "dureader": "<|im_start|>system\n请基于给定的文章回答下述问题。\n\n文章：{context}\n",
+            "multi_news": "<|im_start|>system\nYou are given several news passages. Write a one-page summary of all news. \n\nNews:\n{context}\n",
+            "trec": "<|im_start|>system\nPlease determine the type of the question below. Here are some examples of questions.\n\n{context}",
+            "triviaqa": "<|im_start|>system\nAnswer the question based on the given passage. Only give me the answer and do not output any other words. The following are some examples.\n\n{context}\n",
+            "samsum": "<|im_start|>system\nSummarize the dialogue into a few short sentences. The following are some examples.\n\n{context}\n",
+            "passage_retrieval_zh": "<|im_start|>system\n以下是若干段落文字，以及其中一个段落的摘要。请确定给定的摘要出自哪一段。\n\n{context}\n"
+        },
+        "Qwen2":{
+            "hotpotqa": "<|im_start|>system\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "2wikimqa": "<|im_start|>system\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "musique": "<|im_start|>system\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "dureader": "<|im_start|>system\n请基于给定的文章回答下述问题。\n\n文章：{context}\n",
+            "multi_news": "<|im_start|>system\nYou are given several news passages. Write a one-page summary of all news. \n\nNews:\n{context}\n",
+            "trec": "<|im_start|>system\nPlease determine the type of the question below. Here are some examples of questions.\n\n{context}",
+            "triviaqa": "<|im_start|>system\nAnswer the question based on the given passage. Only give me the answer and do not output any other words. The following are some examples.\n\n{context}\n",
+            "samsum": "<|im_start|>system\nSummarize the dialogue into a few short sentences. The following are some examples.\n\n{context}\n",
+            "passage_retrieval_zh": "<|im_start|>system\n以下是若干段落文字，以及其中一个段落的摘要。请确定给定的摘要出自哪一段。\n\n{context}\n"
+        },
+        "Mistral":{
+            "hotpotqa": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "2wikimqa": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "musique": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{context}\n",
+            "dureader": "请基于给定的文章回答下述问题。\n\n文章：{context}\n",
+            "multi_news": "You are given several news passages. Write a one-page summary of all news. \n\nNews:\n{context}\n",
+            "trec": "Please determine the type of the question below. Here are some examples of questions.\n\n{context}",
+            "triviaqa": "Answer the question based on the given passage. Only give me the answer and do not output any other words. The following are some examples.\n\n{context}\n",
+            "samsum": "Summarize the dialogue into a few short sentences. The following are some examples.\n\n{context}\n",
+            "passage_retrieval_zh": "以下是若干段落文字，以及其中一个段落的摘要。请确定给定的摘要出自哪一段。\n\n{context}\n"
+        }
+    },
+    "query_prompt":{
+        "Qwen1.5":{
+            "hotpotqa": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:\n<|im_end|>\n<|im_start|>assistant\n",
+            "2wikimqa": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:\n<|im_end|>\n<|im_start|>assistant\n",
+            "musique": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:\n<|im_end|>\n<|im_start|>assistant\n",
+            "dureader": "\n请基于上述文章回答下面的问题。\n\n问题：{input}\n回答：\n<|im_end|>\n<|im_start|>assistant\n",
+            "multi_news": "\nNow, write a one-page summary of all the news.\n\nSummary:\n<|im_end|>\n<|im_start|>assistant\n",
+            "trec": "\n{input}\n<|im_end|>\n<|im_start|>assistant\n",
+            "triviaqa": "\n{input}\n<|im_end|>\n<|im_start|>assistant\n",
+            "samsum": "\n{input}\n<|im_end|>\n<|im_start|>assistant\n",
+            "passage_retrieval_zh": "\n下面是一个摘要\n\n{input}\n\n请输入摘要所属段落的编号。答案格式必须是\"段落1\"，\"段落2\"等格式\n\n答案是：\n<|im_end|>\n<|im_start|>assistant\n"
+        },
+        "Qwen2":{
+            "hotpotqa": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:\n<|im_end|>\n<|im_start|>assistant\n",
+            "2wikimqa": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:\n<|im_end|>\n<|im_start|>assistant\n",
+            "musique": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:\n<|im_end|>\n<|im_start|>assistant\n",
+            "dureader": "\n请基于上述文章回答下面的问题。\n\n问题：{input}\n回答：\n<|im_end|>\n<|im_start|>assistant\n",
+            "multi_news": "\nNow, write a one-page summary of all the news.\n\nSummary:\n<|im_end|>\n<|im_start|>assistant\n",
+            "trec": "\n{input}\n<|im_end|>\n<|im_start|>assistant\n",
+            "triviaqa": "\n{input}\n<|im_end|>\n<|im_start|>assistant\n",
+            "samsum": "\n{input}\n<|im_end|>\n<|im_start|>assistant\n",
+            "passage_retrieval_zh": "\n下面是一个摘要\n\n{input}\n\n请输入摘要所属段落的编号。答案格式必须是\"段落1\"，\"段落2\"等格式\n\n答案是：\n<|im_end|>\n<|im_start|>assistant\n"
+        },
+        "Mistral":{
+            "hotpotqa": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:",
+            "2wikimqa": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:",
+            "musique": "\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {input}\nAnswer:",
+            "dureader": "\n请基于上述文章回答下面的问题。\n\n问题：{input}\n回答：",
+            "multi_news": "\nNow, write a one-page summary of all the news.\n\nSummary:",
+            "trec": "\n{input}",
+            "triviaqa": "\n{input}",
+            "samsum": "\n{input}",
+            "passage_retrieval_zh": "\n下面是一个摘要\n\n{input}\n\n请输入摘要所属段落的编号。答案格式必须是\"段落1\"，\"段落2\"等格式\n\n答案是："
+        }
+    }
+}

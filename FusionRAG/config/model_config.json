@@ -1,0 +1,26 @@
+{
+    "Qwen1.5":{
+        "stop_token_id":151645
+    },
+    "Qwen2":{
+        "stop_token_id":151645
+    },
+    "Mistral":{
+        "stop_token_id":2
+    },
+    "Qwen2.5":{
+        "stop_token_id":151645
+    },
+    "Qwen3":{
+        "stop_token_id":151645
+    },
+    "Llama":{
+        "stop_token_id":128001
+    },
+    "GLM":{
+        "stop_token_id":151329
+    },
+    "openPangu":{
+        "stop_token_id":151329
+    }
+}

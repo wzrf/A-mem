@@ -1,4 +1,4 @@
-from ast import Str
+# from ast import Str
 from typing import List, Dict, Optional, Literal, Any, Union
 import json
 from datetime import datetime
@@ -17,6 +17,10 @@ from litellm import completion
 import requests
 import json as json_lib
 import time
+
+EMBEDDING_MODEL = SentenceTransformer(
+    'all-MiniLM-L6-v2'
+)
 
 def simple_tokenize(text):
     return word_tokenize(text)
@@ -560,7 +564,7 @@ class SimpleEmbeddingRetriever:
         Args:
             model_name: Name of the SentenceTransformer model to use
         """
-        self.model = SentenceTransformer(model_name)
+        self.model = EMBEDDING_MODEL
         self.corpus = []
         self.embeddings = None
         self.document_ids = {}  # Map document content to its index

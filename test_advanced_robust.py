@@ -6,13 +6,15 @@ Usage:
     python test_advanced_robust.py --backend openai --model gpt-4o-mini --dataset data/locomo10.json
     python test_advanced_robust.py --backend ollama --model qwen2.5:3b --dataset data/locomo10.json
 """
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
+from sglang_kvcache import get_model_and_prompt, run_one_question_sglang
 from llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
     parse_keywords_response,
 )
+import platform
 import os
 import json
 import argparse
@@ -33,12 +35,12 @@ from utils import calculate_metrics, aggregate_metrics
 from datetime import datetime
 
 # Download required NLTK data
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.data.find('wordnet')
-except LookupError:
-    nltk.download('punkt')
-    nltk.download('wordnet')
+# try:
+#     nltk.data.find('tokenizers/punkt')
+#     nltk.data.find('wordnet')
+# except LookupError:
+#     nltk.download('punkt')
+#     nltk.download('wordnet')
 
 # Initialize SentenceTransformer model (this will be reused)
 try:
@@ -48,13 +50,36 @@ except Exception as e:
     sentence_model = None
 
 logger = logging.getLogger("amem_robust")
-
+use_fusion_rag = platform.system().lower() == "linux"
+from FusionRAG.run_question import FusionRAGModel
 
 class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000):
+                 sglang_host="http://localhost", sglang_port=30000,
+                 fusion_rag_model=None,
+                 model_sglang="",
+                 recomputation_rate: float=-1,
+                 method_keyword="",
+                 preprocess=False,
+                 use_weighted_diff_attention=True,
+                 sglang_url="",
+                 sglang_url_prefiller=""
+                 ):
+
+        if use_fusion_rag:
+            self.model_sglang = model_sglang
+            self.fusion_rag_model = fusion_rag_model
+            self.recomputation_rate = recomputation_rate
+            self.method_keyword = method_keyword
+            self.preprocess = preprocess
+            self.use_weighted_diff_attention = use_weighted_diff_attention
+            self.sglang_url = sglang_url
+            self.sglang_url_prefiller = sglang_url_prefiller
+        else:
+            self.fusion_rag_model = None
+
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -109,7 +134,7 @@ Keywords:"""
     def answer_question(self, question: str, category: int, answer: str) -> tuple:
         """Generate answer for a question — plain text, no JSON schema."""
         keywords = self.generate_query_llm(question)
-        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
+        raw_context, raw_context_list = self.retrieve_memory(keywords, k=self.retrieve_k)
         context = raw_context
 
         assert category in [1, 2, 3, 4, 5]
@@ -153,6 +178,79 @@ Question: {question} Short answer:"""
         return response, user_prompt, raw_context
 
 
+    def answer_question_fusionrag(self, question: str, category: int, answer: str) -> tuple:
+        """Generate answer for a question — plain text, no JSON schema."""
+        keywords = self.generate_query_llm(question)
+        raw_context, raw_context_list = self.retrieve_memory(keywords, k=self.retrieve_k)
+        context = raw_context
+
+        _, DEFAULT_SYSTEM_PROMPT, _ = get_model_and_prompt(model=self.model_sglang)
+        DEFAULT_SYSTEM_PROMPT += "Based on the context: "
+
+        assert category in [1, 2, 3, 4]
+
+        if category == 5:
+            answer_tmp = list()
+            if random.random() < 0.5:
+                answer_tmp.append('Not mentioned in the conversation')
+                answer_tmp.append(answer)
+            else:
+                answer_tmp.append(answer)
+                answer_tmp.append('Not mentioned in the conversation')
+            user_prompt = f"""Based on the context: {context}, answer the following question. {question}
+
+Select the correct answer: {answer_tmp[0]} or {answer_tmp[1]}  Short answer:"""
+            temperature = self.temperature_c5
+        elif category == 2:
+            user_prompt = f""", answer the following question. Use DATE of CONVERSATION to answer with an approximate date.
+Please generate the shortest possible answer, using words from the conversation where possible, and avoid using any subjects.
+
+Question: {question} Short answer:"""
+        elif category == 3:
+            user_prompt = f""", write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.
+
+Question: {question} Short answer:"""
+        else:
+            user_prompt = f""", write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.
+
+Question: {question} Short answer:"""
+
+
+        query_draft = user_prompt.format(question=question)
+        recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before = self.fusion_rag_model.draft_one_question(
+            DEFAULT_SYSTEM_PROMPT,  ## DEFAULT_SYSTEM_PROMPT
+            raw_context_list,
+            query_draft,
+            self.recomputation_rate,
+            self.method_keyword,
+            False,
+            False,
+            [],
+            self.use_weighted_diff_attention,
+            self.preprocess,  ## if do preprocess
+            False,
+            True
+        )
+
+        content, usage, top_logprobs, real_recomputation_rate = run_one_question_sglang(
+            query_draft,
+            raw_context_list,
+            500,  ## max tokens.
+            [],
+            recompute_tokens,
+            recompute_tokens_list,
+            1,  ## max_workers.
+            self.recomputation_rate,
+            self.model_sglang,
+            self.sglang_url,
+            self.sglang_url_prefiller,
+            self.method_keyword
+        )
+        if "</think>" in content:
+            content = content.split("</think>")[1].strip()
+        return content, user_prompt, raw_context
+
+
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """Set up logging configuration."""
     eval_logger = logging.getLogger('locomo_eval_robust')
@@ -169,6 +267,115 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
         eval_logger.addHandler(file_handler)
 
     return eval_logger
+
+
+def build_memory(dataset_path: str, model: str, output_path: Optional[str] = None,
+                 ratio: float = 1.0, backend: str = "sglang",
+                 temperature_c5: float = 0.5, retrieve_k: int = 10,
+                 sglang_host: str = "http://localhost", sglang_port: int = 30000,
+                 max_workers: int = 16):
+    """Evaluate the robust agent on the LoComo dataset using multi-threading."""
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
+    log_path = os.path.join(os.path.dirname(__file__), "logs", log_filename)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    eval_logger = setup_logger(log_path)
+    eval_logger.info(f"Loading dataset from {dataset_path}")
+    eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
+
+    samples = load_locomo_dataset(dataset_path)
+    eval_logger.info(f"Loaded {len(samples)} samples")
+
+    if ratio < 1.0:
+        num_samples = max(1, int(len(samples) * ratio))
+        samples = samples[:num_samples]
+        eval_logger.info(f"Using {num_samples} samples ({ratio * 100:.1f}% of dataset)")
+
+    memories_dir = os.path.join(
+        os.path.dirname(__file__),
+        "cached_memories_robust_{}_{}".format(backend, model),
+    )
+    os.makedirs(memories_dir, exist_ok=True)
+
+    sapphire3_ip = "192.168.200.15"
+    sapphire3_prefiller_port = 30003
+    fusion_rag_model = None
+
+    def process_sample(sample_idx: int, sample):
+        """单样本处理函数（运行在独立线程中）"""
+        prefix = f"[Sample {sample_idx + 1}/{len(samples)}]"
+
+        agent = RobustAdvancedMemAgent(
+            model, backend, retrieve_k, temperature_c5,
+            sglang_host, sglang_port,
+            model_sglang="Qwen3-8B",
+            recomputation_rate=0.3,
+            method_keyword="",
+            preprocess=False,
+            use_weighted_diff_attention=True,
+            sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+            sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+            fusion_rag_model=fusion_rag_model
+        )
+
+        memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
+        retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
+        retriever_cache_embeddings_file = os.path.join(
+            memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
+        )
+
+        if os.path.exists(memory_cache_file):
+            eval_logger.info(f"{prefix} Loading cached memories")
+            with open(memory_cache_file, 'rb') as f:
+                cached_memories = pickle.load(f)
+            agent.memory_system.memories = cached_memories
+            if os.path.exists(retriever_cache_file):
+                eval_logger.info(f"{prefix} Found retriever cache files")
+                agent.memory_system.retriever = agent.memory_system.retriever.load(
+                    retriever_cache_file, retriever_cache_embeddings_file
+                )
+            else:
+                eval_logger.info(f"{prefix} No retriever cache found, loading from memory")
+                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
+                    cached_memories, 'all-MiniLM-L6-v2'
+                )
+            eval_logger.info(f"{prefix} Successfully loaded {len(cached_memories)} memories")
+        else:
+            eval_logger.info(f"{prefix} No cached memories found. Creating new memories.")
+
+            eval_logger.info(f"{prefix} total sessions: {len(sample.conversation.sessions.items())}")
+            for session_idx, turns in sample.conversation.sessions.items():
+                for turx_idx, turn in enumerate(turns.turns):
+                    turn_datatime = turns.date_time
+                    conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
+                    agent.add_memory(conversation_tmp, time=turn_datatime)
+                    print(f"{prefix} finish turn {turx_idx}/{len(turns.turns)}")
+                print(f"{prefix} finish session {session_idx}")
+
+            memories_to_cache = agent.memory_system.memories
+            with open(memory_cache_file, 'wb') as f:
+                pickle.dump(memories_to_cache, f)
+            agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
+            eval_logger.info(f"{prefix} Successfully cached {len(memories_to_cache)} memories")
+
+        eval_logger.info(f"{prefix} Finished processing")
+
+    # 使用 ThreadPoolExecutor 进行 16 线程并发处理
+    eval_logger.info(f"Starting multi-threaded processing with {max_workers} workers...")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(process_sample, sample_idx, sample): sample_idx
+            for sample_idx, sample in enumerate(samples)
+        }
+
+        for future in as_completed(futures):
+            sample_idx = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                eval_logger.error(f"[Sample {sample_idx + 1}] Processing failed with error: {e}", exc_info=True)
 
 
 def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None,
@@ -208,9 +415,36 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4, 5]
 
+    sapphire3_ip = "192.168.200.15"
+    sapphire3_prefiller_port = 30003
+    SYSTEM_ = platform.system().lower()
+    if SYSTEM_ == "linux":
+        fusion_rag_model = FusionRAGModel(
+            device="cuda:4",
+            draft_model_device="cuda:4",
+            draft_model_path='/mnt/data/models/Qwen2.5-3B-Instruct',
+            draft_model_type="qwen",
+            draft_model_name="Qwen2.5-3B-Instruct",
+            model_path="",
+            cache_path="",
+            preprocess=False,
+            apikey="xxx",
+        )
+    else:
+        fusion_rag_model = None
+
     for sample_idx, sample in enumerate(samples):
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port)
+                                       sglang_host, sglang_port,
+                                       model_sglang="Qwen3-8B",
+                                       recomputation_rate=0.3,
+                                       method_keyword="",
+                                       preprocess=False,
+                                       use_weighted_diff_attention=True,
+                                       sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                                       sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                                       fusion_rag_model=fusion_rag_model
+                                       )
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -237,11 +471,13 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         else:
             eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
 
-            for _, turns in sample.conversation.sessions.items():
+            print(f"total sessions: {len(sample.conversation.sessions.items())}")
+            for session_idx, turns in sample.conversation.sessions.items():
                 for turn in turns.turns:
                     turn_datatime = turns.date_time
                     conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
                     agent.add_memory(conversation_tmp, time=turn_datatime)
+                print(f"finish session {session_idx}")
 
             memories_to_cache = agent.memory_system.memories
             with open(memory_cache_file, 'wb') as f:
@@ -256,9 +492,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 total_questions += 1
                 category_counts[qa.category] += 1
 
-                prediction, user_prompt, raw_context = agent.answer_question(
-                    qa.question, qa.category, qa.final_answer
-                )
+                if SYSTEM_ == "linux":
+                    prediction, user_prompt, raw_context = agent.answer_question_fusionrag(
+                        qa.question, qa.category, qa.final_answer
+                    )
+                else:
+                    prediction, user_prompt, raw_context = agent.answer_question(
+                        qa.question, qa.category, qa.final_answer
+                    )
 
                 # Parse the prediction (handles both JSON and plain text)
                 prediction = parse_plain_text_answer(prediction)
@@ -335,10 +576,12 @@ def main():
     )
     parser.add_argument("--dataset", type=str, default="data/locomo10.json",
                         help="Path to the dataset file")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini",
+    parser.add_argument("--model", type=str, default="deepseek-v3.2",
                         help="Model to use")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to save evaluation results")
+    parser.add_argument("--skip_build", type=bool, default=False,
+                        help="skip parallel build")
     parser.add_argument("--ratio", type=float, default=1.0,
                         help="Ratio of dataset to evaluate (0.0 to 1.0)")
     parser.add_argument("--backend", type=str, default="openai",
@@ -358,6 +601,13 @@ def main():
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
+
+    if not args.skip_build:
+        build_memory(
+            dataset_path, args.model, output_path, args.ratio,
+            args.backend, args.temperature_c5, args.retrieve_k,
+            args.sglang_host, args.sglang_port,
+        )
 
     evaluate_dataset(
         dataset_path, args.model, output_path, args.ratio,

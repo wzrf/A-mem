@@ -1,0 +1,10 @@
+{
+  "example_idx": 4,
+  "sub_question_idx": 1,
+  "main_question": "When was the sibling of Alice de Lusignan, Countess of Surrey crowned?",
+  "sub_question": "When was King Henry III of England crowned?",
+  "ground_truth": "Henry III was first crowned in 1216 at Gloucester Cathedral and had a second coronation on 17 May 1220 at Westminster Abbey.",
+  "generated_answer_rate1": "1216 and 1220",
+  "generated_answer_rate03": "226 and 1220",
+  "num_answer_tokens": 10
+}

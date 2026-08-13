@@ -105,7 +105,8 @@ class RobustOpenAIController(RobustBaseLLMController):
             api_key = os.getenv('OPENAI_API_KEY')
         if api_key is None:
             raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
-        self.client = OpenAI(api_key=api_key)
+        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
@@ -427,36 +428,47 @@ class RobustAgenticMemorySystem:
             )
         return memory_str, indices
 
-    def find_related_memories_raw(self, query: str, k: int = 5) -> str:
+    def find_related_memories_raw(self, query: str, k: int = 5) -> (str, list):
         """Find related memories with neighborhood expansion."""
         if not self.memories:
-            return ""
+            return "", []
 
         indices = self.retriever.search(query, k)
         all_memories = list(self.memories.values())
         memory_str = ""
+        memory_str_list = []
+        chosen = []
         for i in indices:
             j = 0
-            memory_str += (
-                "talk start time:" + all_memories[i].timestamp +
-                "memory content: " + all_memories[i].content +
-                "memory context: " + all_memories[i].context +
-                "memory keywords: " + str(all_memories[i].keywords) +
-                "memory tags: " + str(all_memories[i].tags) + "\n"
-            )
+            if i not in chosen:
+                memory_str_ = (
+                    "talk start time:" + all_memories[i].timestamp +
+                    "memory content: " + all_memories[i].content +
+                    "memory context: " + all_memories[i].context +
+                    "memory keywords: " + str(all_memories[i].keywords) +
+                    "memory tags: " + str(all_memories[i].tags) + "\n"
+                )
+                memory_str += memory_str_
+                memory_str_list.append(memory_str_)
+                chosen.append(i)
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
-                memory_str += (
-                    "talk start time:" + all_memories[neighbor].timestamp +
-                    "memory content: " + all_memories[neighbor].content +
-                    "memory context: " + all_memories[neighbor].context +
-                    "memory keywords: " + str(all_memories[neighbor].keywords) +
-                    "memory tags: " + str(all_memories[neighbor].tags) + "\n"
-                )
-                if j >= k:
-                    break
-                j += 1
-        return memory_str
+                if neighbor < len(all_memories):
+                    if neighbor not in chosen:
+                        memory_str_ = (
+                            "talk start time:" + all_memories[neighbor].timestamp +
+                            "memory content: " + all_memories[neighbor].content +
+                            "memory context: " + all_memories[neighbor].context +
+                            "memory keywords: " + str(all_memories[neighbor].keywords) +
+                            "memory tags: " + str(all_memories[neighbor].tags) + "\n"
+                        )
+                        memory_str += memory_str_
+                        memory_str_list.append(memory_str_)
+                        chosen.append(neighbor)
+                    if j >= k:
+                        break
+                    j += 1
+        return memory_str, memory_str_list
 
     # ---- evolution (3 sequential plain-text calls) ----
 

@@ -18,11 +18,13 @@ from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
 from sentence_transformers.util import pytorch_cos_sim
 
 # Download required NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('wordnet', quiet=True)
-except Exception as e:
-    print(f"Error downloading NLTK data: {e}")
+
+##mengyao_debug for debug
+# try:
+#     nltk.download('punkt', quiet=True)
+#     nltk.download('wordnet', quiet=True)
+# except Exception as e:
+#     print(f"Error downloading NLTK data: {e}")
 
 # Initialize SentenceTransformer model (this will be reused)
 try:
