@@ -1,8 +1,0 @@
-2026-08-13 02:47:11,896 - INFO - Loading dataset from /Users/xumengyao/work/QIYUAN/A-mem/data/locomo10.json
-2026-08-13 02:47:11,896 - INFO - Using ROBUST memory layer (no JSON schema dependency)
-2026-08-13 02:47:12,032 - INFO - Loaded 10 samples
-2026-08-13 02:47:20,382 - INFO - Loading cached memories for sample 0
-2026-08-13 02:47:20,385 - INFO - Found retriever cache files
-2026-08-13 02:47:20,387 - INFO - Successfully loaded 419 memories
-2026-08-13 02:47:20,387 - INFO - Processing sample 1/10
-2026-08-13 02:47:28,592 - INFO - No cached memories found for sample 1. Creating new memories.

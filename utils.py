@@ -26,6 +26,9 @@ from sentence_transformers.util import pytorch_cos_sim
 # except Exception as e:
 #     print(f"Error downloading NLTK data: {e}")
 
+nltk.data.find('tokenizers/punkt')
+nltk.data.find('corpora/wordnet')
+
 # Initialize SentenceTransformer model (this will be reused)
 try:
     sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
