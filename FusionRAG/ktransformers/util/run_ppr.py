@@ -6,6 +6,8 @@ import numpy as np
 from typing import Dict, Union, Tuple, List
 from sklearn.metrics.pairwise import cosine_similarity
 import copy
+from concurrent.futures import ThreadPoolExecutor
+from typing import Tuple, List
 
 LOQUACIOUS_TEXT = """
 # The Art of Effective Reading: A Comprehensive Guide to Extracting Information from English Articles
@@ -415,6 +417,89 @@ def find_recompute_tokens_within_passages(passages: list[str], combine_tokens: l
         )
         all_recompute_tokens.append(combine_tokens_new)
     return all_recompute_tokens
+
+
+
+def highlight_tokens_compare_batch(k_need_index, passages, tokenizers, query="", passages_str=None):
+    import torch
+    from concurrent.futures import ProcessPoolExecutor
+
+    if type(passages) == list:
+        full_passage = torch.cat(passages).squeeze()
+    else:
+        full_passage = passages
+
+    combined_passages = []
+    last_chosen = False
+    last_tokens = []
+
+    for i, token in enumerate(full_passage):
+        if (i in k_need_index) == last_chosen:
+            last_tokens.append(int(token))
+        else:
+            last_chosen = i in k_need_index
+            combined_passages.append(last_tokens)
+            last_tokens = [int(token)]
+
+    combined_passages.append(last_tokens)
+
+    cumulative_tokens = [
+        sum(combined_passages[:i + 1], [])
+        for i in range(len(combined_passages))
+    ]
+
+    args = [
+        (cumulative_tokens[i], tokenizers[i % len(tokenizers)])
+        for i in range(len(cumulative_tokens))
+    ]
+
+    with ProcessPoolExecutor(max_workers=len(tokenizers)) as executor:
+        decoded = list(executor.map(_decode_with_tokenizer, args))
+
+    combine_tokens = []
+    previous_text = ""
+
+    for cur_text in decoded:
+        combine_tokens.append(cur_text[len(previous_text):])
+        previous_text = cur_text
+
+    all_recompute_tokens = []
+    if passages_str is not None:
+        all_recompute_tokens = find_recompute_tokens_within_passages(
+            combine_tokens=combine_tokens,
+            passages=passages_str
+        )
+
+    print("-" * 50)
+
+    token_args = [
+        (int(token), tokenizers[i % len(tokenizers)])
+        for i, token in enumerate(full_passage)
+    ]
+
+    with ProcessPoolExecutor(max_workers=len(tokenizers)) as executor:
+        tokens = list(executor.map(_decode_with_tokenizer, token_args))
+
+    highlighted_tokens = []
+
+    for i, token in enumerate(tokens):
+        if i in k_need_index:
+            highlighted_tokens.append(f"\033[1;31m{token}\033[0m")
+        else:
+            highlighted_tokens.append(token)
+
+    highlighted_with_spaces = "".join(highlighted_tokens)
+
+    if len(k_need_index) > 0:
+        print(f"query={query}\n")
+        print(f"highlighted_with_spaces={highlighted_with_spaces}")
+
+    return combine_tokens, all_recompute_tokens
+
+
+def _decode_with_tokenizer(args):
+    tokens, tokenizer = args
+    return tokenizer.decode(tokens, skip_special_tokens=False)
 
 
 def highlight_tokens_compare(k_need_index, passages, tokenizer, query="", passages_str=None) -> Tuple[List[str], List[List[str]]]:

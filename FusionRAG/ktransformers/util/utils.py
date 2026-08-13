@@ -23,7 +23,7 @@ import collections
 import numpy as np
 import gc
 import requests
-from ktransformers.util.run_ppr import (personalized_pagerank, get_top_tokens, highlight_tokens_compare,
+from ktransformers.util.run_ppr import (personalized_pagerank, get_top_tokens, highlight_tokens_compare, highlight_tokens_compare_batch,
                                         topk_position_dispersion, OnlineEncoder, calculate_vector_set_similarity,
                                         power_iteration_ppr_tensor, save_distribution_plot, save_matrix_heatmap)
 from ktransformers.models.custom_cache import StaticCache
@@ -2074,7 +2074,7 @@ def find_all_substr_needs_recompute_entropy(draft_model, draft_model_device, tok
 def find_all_substr_needs_recompute(draft_model, draft_model_device, tokenizer, system_prompt: str,
                                     passages: list[str], query: str, rate: float, must_choose_token_indices: list[int],
                                     weighted_use_value: bool, weighted_use_kv:bool, reverse_attn=False,
-                                    use_local_draft_model=True, draft_model_url="", save_attention_heatmap=False, compare_sim=None, keyword="")\
+                                    use_local_draft_model=True, draft_model_url="", save_attention_heatmap=False, compare_sim=None, keyword="", tokenizers=None)\
         -> Tuple[List[str], List[List[str]], List[int], List[int], List[str]]:
     system_prompt_tokens = tokenizer.encode(system_prompt, add_special_tokens = False)
     passages_with_system_prompt_str_list = [system_prompt]
@@ -2187,14 +2187,16 @@ def find_all_substr_needs_recompute(draft_model, draft_model_device, tokenizer, 
 
     selected_indices.extend(must_choose_token_indices)
     selected_indices = sorted(list(set(selected_indices)))
+    time_start = time.time()
     if reverse_attn:
         combine_tokens, all_recompute_tokens = highlight_tokens_compare(selected_indices, torch.tensor(full_input), tokenizer, query=query,
                                     passages_str=passages_with_system_prompt_str_list)
     else:
         combine_tokens, all_recompute_tokens = highlight_tokens_compare(selected_indices, torch.tensor(full_input_without_query), tokenizer, query=query,
                                     passages_str=passages_with_system_prompt_str_list)
+    print(f"highlight_tokens_compare takes time = {time.time() - time_start}")
 
-    return combine_tokens, all_recompute_tokens, sorted_index, sorted_index_before_resort, new_passages
+    return combine_tokens, all_recompute_tokens, sorted_index, sorted_index_before_resort, new_passages, selected_indices
 
 
 def find_all_substr_needs_recompute_and_choose_from_copies(draft_model, draft_model_device, tokenizer, system_prompt: str, past_key_values,

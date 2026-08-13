@@ -188,6 +188,9 @@ class FusionRAGModel:
                 self.draft_model = None
                 self.draft_model_device = None
             self.draft_model_tokenizer = AutoTokenizer.from_pretrained(draft_model_path, trust_remote_code=True)
+            self.draft_model_tokenizers = []
+            for i in range(16):
+                self.draft_model_tokenizers.append(AutoTokenizer.from_pretrained(draft_model_path, trust_remote_code=True))
         else:
             self.use_local_draft_model = True
             print(f"Skipping draft model.")
@@ -945,7 +948,7 @@ class FusionRAGModel:
                 api_key=self.api_key
             )
         else:
-            recompute_tokens, recompute_tokens_list, sorted_index, sorted_index_before_resort, passages = find_all_substr_needs_recompute(
+            recompute_tokens, recompute_tokens_list, sorted_index, sorted_index_before_resort, passages, selected_indices = find_all_substr_needs_recompute(
                 draft_model=self.draft_model,
                 draft_model_device=self.draft_model_device,
                 tokenizer=self.draft_model_tokenizer,
@@ -960,10 +963,11 @@ class FusionRAGModel:
                 compare_sim=compare_sim,
                 keyword=keyword,
                 weighted_use_value=weighted_use_value,
-                weighted_use_kv=weighted_use_kv
+                weighted_use_kv=weighted_use_kv,
+                tokenizers=self.draft_model_tokenizers
             )
         torch.cuda.empty_cache()
-        return recompute_tokens, recompute_tokens_list, passages, rate, sorted_index, sorted_index_before_resort
+        return recompute_tokens, recompute_tokens_list, passages, rate, sorted_index, sorted_index_before_resort, selected_indices
 
 
     ## mengyao_debug 默认在preprocess的时候 full recomputation

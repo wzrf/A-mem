@@ -8,7 +8,7 @@ Usage:
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
-from sglang_kvcache import get_model_and_prompt, run_one_question_sglang
+from sglang_kvcache import get_model_and_prompt, run_one_question_sglang, run_one_question_origin_sglang
 from llm_text_parsers import (
     parse_plain_text_answer,
     parse_relevant_parts,
@@ -50,8 +50,81 @@ except Exception as e:
     sentence_model = None
 
 logger = logging.getLogger("amem_robust")
-use_fusion_rag = platform.system().lower() == "linux"
 from FusionRAG.run_question import FusionRAGModel
+
+import random
+from collections import defaultdict
+from typing import List, Optional, Any
+
+def sample_qa_by_ratio(
+    qa_list: List[Any],
+    ratio: float = 0.1,
+    allow_categories: Optional[List[int]] = None,
+    seed: Optional[int] = None
+) -> List[Any]:
+    """
+    按照类别 (category) 的比例从 QA 列表中随机抽样。
+
+    :param qa_list: 原始 QA 对象列表 (如 sample.qa)
+    :param ratio: 抽样比例 (如 0.1 代表抽 10%)
+    :param allow_categories: 允许选择的类别列表，如 [1, 2, 3, 4, 5]。若为 None 则使用全部类别
+    :param seed: 随机种子 (传入整数可固定抽样结果，便于复现)
+    :return: 抽样后的 QA 列表
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    # 1. 过滤符合分类条件的 QA
+    if allow_categories is not None:
+        allow_set = set(allow_categories)
+        valid_qas = [qa for qa in qa_list if int(qa.category) in allow_set]
+    else:
+        valid_qas = list(qa_list)
+
+    total_valid = len(valid_qas)
+    if total_valid == 0 or ratio <= 0:
+        return []
+
+    # 2. 计算目标抽取总数 (至少取 1 个，最多不超总数)
+    target_count = min(total_valid, max(1, round(total_valid * ratio)))
+
+    if target_count >= total_valid:
+        return valid_qas
+
+    # 3. 按 category 分组
+    qa_by_cat = defaultdict(list)
+    for qa in valid_qas:
+        qa_by_cat[int(qa.category)].append(qa)
+
+    # 4. 计算每个类别的配额（最大余数法）
+    allocated_counts = {}
+    remainders = []
+
+    for cat, qas in qa_by_cat.items():
+        exact_quota = target_count * (len(qas) / total_valid)
+        floor_quota = int(exact_quota)
+        allocated_counts[cat] = floor_quota
+        # 记录小数余数和类别
+        remainders.append((exact_quota - floor_quota, cat))
+
+    # 补充因为取整丢失的名额
+    remaining_slots = target_count - sum(allocated_counts.values())
+    remainders.sort(reverse=True, key=lambda x: x[0])  # 余数从大到小排序
+
+    for i in range(remaining_slots):
+        cat = remainders[i][1]
+        allocated_counts[cat] += 1
+
+    # 5. 按分配好的名额在每个类别内随机抽取
+    selected_qas = []
+    for cat, count in allocated_counts.items():
+        if count > 0:
+            selected_qas.extend(random.sample(qa_by_cat[cat], count))
+
+    # 再次打乱顺章（可选，避免同一类别的 QA 集中在一起）
+    random.shuffle(selected_qas)
+
+    return selected_qas
 
 class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
@@ -65,7 +138,8 @@ class RobustAdvancedMemAgent:
                  preprocess=False,
                  use_weighted_diff_attention=True,
                  sglang_url="",
-                 sglang_url_prefiller=""
+                 sglang_url_prefiller="",
+                 use_fusion_rag=False
                  ):
 
         if use_fusion_rag:
@@ -217,35 +291,45 @@ Question: {question} Short answer:"""
 
 
         query_draft = user_prompt.format(question=question)
-        recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before = self.fusion_rag_model.draft_one_question(
-            DEFAULT_SYSTEM_PROMPT,  ## DEFAULT_SYSTEM_PROMPT
-            raw_context_list,
-            query_draft,
-            self.recomputation_rate,
-            self.method_keyword,
-            False,
-            False,
-            [],
-            self.use_weighted_diff_attention,
-            self.preprocess,  ## if do preprocess
-            False,
-            True
-        )
+        if self.recomputation_rate < 1.0:
+            recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before, recompute_indices = self.fusion_rag_model.draft_one_question(
+                DEFAULT_SYSTEM_PROMPT,  ## DEFAULT_SYSTEM_PROMPT
+                raw_context_list,
+                query_draft,
+                self.recomputation_rate,
+                self.method_keyword,
+                False,
+                False,
+                [],
+                self.use_weighted_diff_attention,
+                self.preprocess,  ## if do preprocess
+                False,
+                True
+            )
 
-        content, usage, top_logprobs, real_recomputation_rate = run_one_question_sglang(
-            query_draft,
-            raw_context_list,
-            500,  ## max tokens.
-            [],
-            recompute_tokens,
-            recompute_tokens_list,
-            1,  ## max_workers.
-            self.recomputation_rate,
-            self.model_sglang,
-            self.sglang_url,
-            self.sglang_url_prefiller,
-            self.method_keyword
-        )
+            content, usage, top_logprobs, real_recomputation_rate = run_one_question_sglang(
+                query_draft,
+                raw_context_list,
+                500,  ## max tokens.
+                [],
+                recompute_tokens,
+                recompute_tokens_list,
+                1,  ## max_workers.
+                self.recomputation_rate,
+                self.model_sglang,
+                self.sglang_url,
+                self.sglang_url_prefiller,
+                self.method_keyword,
+                recompute_indices=recompute_indices,
+            )
+        else:
+            content, usage, top_logprobs, real_recomputation_rate = run_one_question_origin_sglang(
+                query_prompt=query_draft,
+                retrived_docs=raw_context_list,
+                max_tokens=500,
+                model_use=self.model_sglang,
+                endpoint_url=self.sglang_url,
+            )
         if "</think>" in content:
             content = content.split("</think>")[1].strip()
         return content, user_prompt, raw_context
@@ -310,7 +394,6 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
             model, backend, retrieve_k, temperature_c5,
             sglang_host, sglang_port,
             model_sglang="Qwen3-8B",
-            recomputation_rate=0.3,
             method_keyword="",
             preprocess=False,
             use_weighted_diff_attention=True,
@@ -381,7 +464,8 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
 def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None,
                      ratio: float = 1.0, backend: str = "sglang",
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
-                     sglang_host: str = "http://localhost", sglang_port: int = 30000):
+                     sglang_host: str = "http://localhost", sglang_port: int = 30000, use_fusion_rag=False,
+                     recomputation_rate=0.3, qa_ratio=1.0):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
@@ -406,6 +490,27 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     total_questions = 0
     category_counts = defaultdict(int)
 
+    # --- 新增：检查并读取已有的结果文件 ---
+    fusion_rag_tag = "fusion_rag" if use_fusion_rag else ""
+    results_file = f"./results/result_{fusion_rag_tag}_{recomputation_rate}.json"
+    processed_keys = set()
+
+    if os.path.exists(results_file):
+        try:
+            with open(results_file, "r") as f:
+                results = json.load(f)
+            for r in results:
+                processed_keys.add((r["sample_id"], r["question"]))
+                all_metrics.append(r["metrics"])
+                all_categories.append(r["category"])
+                total_questions += 1
+                category_counts[r["category"]] += 1
+            eval_logger.info(f"Loaded {len(results)} existing results from {results_file}, skipping them.")
+        except Exception as e:
+            eval_logger.warning(f"Failed to load existing results from {results_file}: {e}")
+            results = []
+    # -----------------------------------
+
     i = 0
     error_num = 0
     memories_dir = os.path.join(
@@ -413,7 +518,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "cached_memories_robust_{}_{}".format(backend, model),
     )
     os.makedirs(memories_dir, exist_ok=True)
-    allow_categories = [1, 2, 3, 4, 5]
+    allow_categories = [1, 2, 3, 4]
 
     sapphire3_ip = "192.168.200.15"
     sapphire3_prefiller_port = 30003
@@ -437,13 +542,14 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
                                        sglang_host, sglang_port,
                                        model_sglang="Qwen3-8B",
-                                       recomputation_rate=0.3,
+                                       recomputation_rate=recomputation_rate,
                                        method_keyword="",
                                        preprocess=False,
                                        use_weighted_diff_attention=True,
                                        sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
                                        sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-                                       fusion_rag_model=fusion_rag_model
+                                       fusion_rag_model=fusion_rag_model,
+                                       use_fusion_rag=use_fusion_rag,
                                        )
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
@@ -487,12 +593,26 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
-        for qa in sample.qa:
+        print(f"full qa length={len(sample.qa)}")
+        # for qa in sample.qa:
+        qa_sub_list = sample_qa_by_ratio(
+            qa_list=sample.qa,
+            ratio=qa_ratio,
+            allow_categories=allow_categories,
+            seed=42,
+        )
+        for qa in qa_sub_list:
             if int(qa.category) in allow_categories:
+                # --- 新增：判断是否已经评估过，若是则跳过 ---
+                if (sample_idx, qa.question) in processed_keys:
+                    eval_logger.info(f"Skipping already evaluated question: {qa.question}")
+                    continue
+                # ----------------------------------------
+
                 total_questions += 1
                 category_counts[qa.category] += 1
 
-                if SYSTEM_ == "linux":
+                if use_fusion_rag:
                     prediction, user_prompt, raw_context = agent.answer_question_fusionrag(
                         qa.question, qa.category, qa.final_answer
                     )
@@ -529,6 +649,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     "metrics": metrics,
                 }
                 results.append(result)
+
+                os.makedirs("./results", exist_ok=True)
+                with open(results_file, "w") as f:
+                    json.dump(results, f, indent=4)
 
                 if total_questions % 10 == 0:
                     eval_logger.info(f"Processed {total_questions} questions")
@@ -582,8 +706,14 @@ def main():
                         help="Path to save evaluation results")
     parser.add_argument("--skip_build", type=bool, default=False,
                         help="skip parallel build")
+    parser.add_argument("--use_fusion_rag", type=bool, default=False,
+                        help="use fusion rag or not")
+    parser.add_argument("--recomputation_rate", type=float, default=0.3,
+                        help="recomputation rate for fusionrag")
     parser.add_argument("--ratio", type=float, default=1.0,
                         help="Ratio of dataset to evaluate (0.0 to 1.0)")
+    parser.add_argument("--qa_ratio", type=float, default=1.0,
+                        help="Ratio of qa to evaluate (0.0 to 1.0)")
     parser.add_argument("--backend", type=str, default="openai",
                         help="Backend to use (openai, ollama, sglang, or vllm)")
     parser.add_argument("--temperature_c5", type=float, default=0.5,
@@ -602,6 +732,8 @@ def main():
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
 
+    print(f"use_fusion_rag= {args.use_fusion_rag}")
+
     if not args.skip_build:
         build_memory(
             dataset_path, args.model, output_path, args.ratio,
@@ -612,7 +744,8 @@ def main():
     evaluate_dataset(
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
-        args.sglang_host, args.sglang_port,
+        args.sglang_host, args.sglang_port, args.use_fusion_rag,
+        args.recomputation_rate, qa_ratio=args.qa_ratio,
     )
 
 
