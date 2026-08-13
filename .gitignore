@@ -1,3 +1,4 @@
+*.png
 cached_memories_robust_openai_deepseek-v3.2/
 .venv*/
 results/

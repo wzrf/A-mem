@@ -33,6 +33,9 @@ import random
 from tqdm import tqdm
 from utils import calculate_metrics, aggregate_metrics
 from datetime import datetime
+import os
+import queue
+import threading
 
 # Download required NLTK data
 # try:
@@ -249,7 +252,7 @@ Question: {question} Short answer:"""
         except Exception as e:
             logger.warning("answer_question failed: %s — returning empty", e)
             response = ""
-        return response, user_prompt, raw_context
+        return response, user_prompt, raw_context, raw_context_list
 
 
     def answer_question_fusionrag(self, question: str, category: int, answer: str) -> tuple:
@@ -332,7 +335,7 @@ Question: {question} Short answer:"""
             )
         if "</think>" in content:
             content = content.split("</think>")[1].strip()
-        return content, user_prompt, raw_context
+        return content, user_prompt, raw_context, raw_context_list
 
 
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
@@ -461,12 +464,27 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
                 eval_logger.error(f"[Sample {sample_idx + 1}] Processing failed with error: {e}", exc_info=True)
 
 
-def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] = None,
-                     ratio: float = 1.0, backend: str = "sglang",
-                     temperature_c5: float = 0.5, retrieve_k: int = 10,
-                     sglang_host: str = "http://localhost", sglang_port: int = 30000, use_fusion_rag=False,
-                     recomputation_rate=0.3, qa_ratio=1.0):
-    """Evaluate the robust agent on the LoComo dataset."""
+
+def evaluate_dataset(
+    dataset_path: str,
+    model: str,
+    output_path: Optional[str] = None,
+    ratio: float = 1.0,
+    backend: str = "sglang",
+    temperature_c5: float = 0.5,
+    retrieve_k: int = 10,
+    sglang_host: str = "http://localhost",
+    sglang_port: int = 30000,
+    use_fusion_rag=False,
+    recomputation_rate=0.3,
+    qa_ratio=1.0,
+    devices: Optional[List[str]] = None,  # 设备列表，如 ["cuda:0", "cuda:1"]
+    sglang_model="",
+):
+    """Evaluate the robust agent with fine-grained (per-QA) parallelism."""
+    if devices is None:
+        devices = ["cuda:4"]
+
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
     log_path = os.path.join(os.path.dirname(__file__), "logs", log_filename)
@@ -490,9 +508,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     total_questions = 0
     category_counts = defaultdict(int)
 
-    # --- 新增：检查并读取已有的结果文件 ---
+    # --- 检查并读取已有的结果文件 ---
     fusion_rag_tag = "fusion_rag" if use_fusion_rag else ""
-    results_file = f"./results/result_{fusion_rag_tag}_{recomputation_rate}.json"
+    os.makedirs("./results", exist_ok=True)
+    results_file = f"./results/result_{fusion_rag_tag}_{recomputation_rate}_{sglang_model}_retrieve_{retrieve_k}.json"
     processed_keys = set()
 
     if os.path.exists(results_file):
@@ -509,9 +528,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         except Exception as e:
             eval_logger.warning(f"Failed to load existing results from {results_file}: {e}")
             results = []
-    # -----------------------------------
 
-    i = 0
     error_num = 0
     memories_dir = os.path.join(
         os.path.dirname(__file__),
@@ -523,139 +540,213 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     sapphire3_ip = "192.168.200.15"
     sapphire3_prefiller_port = 30003
     SYSTEM_ = platform.system().lower()
-    if SYSTEM_ == "linux":
-        fusion_rag_model = FusionRAGModel(
-            device="cuda:4",
-            draft_model_device="cuda:4",
-            draft_model_path='/mnt/data/models/Qwen2.5-3B-Instruct',
-            draft_model_type="qwen",
-            draft_model_name="Qwen2.5-3B-Instruct",
-            model_path="",
-            cache_path="",
-            preprocess=False,
-            apikey="xxx",
-        )
-    else:
-        fusion_rag_model = None
 
+    # --- 任务队列与结果队列 ---
+    qa_queue = queue.Queue()
+    result_queue = queue.Queue()
+
+    def worker_loop(device_str: str):
+        """Worker 线程：在指定 GPU 上处理单个 QA 任务"""
+        with MODEL_LOAD_LOCK:
+            if SYSTEM_ == "linux" and use_fusion_rag:
+                fusion_rag_model = FusionRAGModel(
+                    device=device_str,
+                    draft_model_device=device_str,
+                    draft_model_path='/mnt/data/models/Qwen2.5-3B-Instruct',
+                    draft_model_type="qwen",
+                    draft_model_name="Qwen2.5-3B-Instruct",
+                    model_path="",
+                    cache_path="",
+                    preprocess=False,
+                    apikey="xxx",
+                )
+            else:
+                fusion_rag_model = None
+
+            agent = RobustAdvancedMemAgent(
+                model, backend, retrieve_k, temperature_c5,
+                sglang_host, sglang_port,
+                model_sglang="Qwen3-8B",
+                recomputation_rate=recomputation_rate,
+                method_keyword="",
+                preprocess=False,
+                use_weighted_diff_attention=True,
+                sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                fusion_rag_model=fusion_rag_model,
+                use_fusion_rag=use_fusion_rag,
+            )
+
+        current_sample_idx = -1  # 记录当前 Agent 加载的 Sample
+
+        while True:
+            task = qa_queue.get()
+            if task is None:  # 结束信号
+                qa_queue.task_done()
+                break
+
+            sample_idx, qa = task
+
+            # 如果任务属于新的 Sample，则加载该 Sample 的 Memory 缓存
+            if current_sample_idx != sample_idx:
+                memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
+                retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
+                retriever_cache_embeddings_file = os.path.join(
+                    memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
+                )
+
+                with open(memory_cache_file, 'rb') as f:
+                    cached_memories = pickle.load(f)
+                agent.memory_system.memories = cached_memories
+
+                if os.path.exists(retriever_cache_file):
+                    agent.memory_system.retriever = agent.memory_system.retriever.load(
+                        retriever_cache_file, retriever_cache_embeddings_file
+                    )
+                else:
+                    agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
+                        cached_memories, 'all-MiniLM-L6-v2'
+                    )
+                current_sample_idx = sample_idx
+
+            # 评估单个 QA
+            if use_fusion_rag:
+                prediction, user_prompt, raw_context, raw_context_list = agent.answer_question_fusionrag(
+                    qa.question, qa.category, qa.final_answer
+                )
+            else:
+                prediction, user_prompt, raw_context, raw_context_list = agent.answer_question(
+                    qa.question, qa.category, qa.final_answer
+                )
+            print(f"prediction={prediction}")
+
+            prediction = parse_plain_text_answer(prediction)
+            metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
+                "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0,
+                "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0,
+                "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
+            }
+
+            result = {
+                "sample_id": sample_idx,
+                "question": qa.question,
+                "prediction": prediction,
+                "reference": qa.final_answer,
+                "category": qa.category,
+                "metrics": metrics,
+                "raw_context_len": len(raw_context_list),
+            }
+
+            log_payload = {
+                "question": qa.question,
+                "prediction": prediction,
+                "reference": qa.final_answer,
+                "user_prompt": user_prompt,
+                "category": qa.category,
+                "raw_context": raw_context
+            }
+
+            result_queue.put((result, metrics, qa.category, log_payload))
+            qa_queue.task_done()
+
+    # 启动工作线程
+    threads = []
+    MODEL_LOAD_LOCK = threading.Lock()
+    for dev in devices:
+        t = threading.Thread(target=worker_loop, args=(dev,))
+        t.start()
+        threads.append(t)
+
+    # --- 逐个 Sample 处理 ---
     for sample_idx, sample in enumerate(samples):
-        agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port,
-                                       model_sglang="Qwen3-8B",
-                                       recomputation_rate=recomputation_rate,
-                                       method_keyword="",
-                                       preprocess=False,
-                                       use_weighted_diff_attention=True,
-                                       sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-                                       sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-                                       fusion_rag_model=fusion_rag_model,
-                                       use_fusion_rag=use_fusion_rag,
-                                       )
+        eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
 
+        # 1. 确保当前 Sample 的 Memory 缓存已建好
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
         retriever_cache_embeddings_file = os.path.join(
             memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
         )
 
-        if os.path.exists(memory_cache_file):
-            eval_logger.info(f"Loading cached memories for sample {sample_idx}")
-            with open(memory_cache_file, 'rb') as f:
-                cached_memories = pickle.load(f)
-            agent.memory_system.memories = cached_memories
-            if os.path.exists(retriever_cache_file):
-                eval_logger.info(f"Found retriever cache files")
-                agent.memory_system.retriever = agent.memory_system.retriever.load(
-                    retriever_cache_file, retriever_cache_embeddings_file
-                )
-            else:
-                eval_logger.info(f"No retriever cache found, loading from memory")
-                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
-                    cached_memories, 'all-MiniLM-L6-v2'
-                )
-            eval_logger.info(f"Successfully loaded {len(cached_memories)} memories")
-        else:
-            eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
-
-            print(f"total sessions: {len(sample.conversation.sessions.items())}")
+        if not os.path.exists(memory_cache_file):
+            eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories...")
+            temp_agent = RobustAdvancedMemAgent(
+                model, backend, retrieve_k, temperature_c5,
+                sglang_host, sglang_port,
+                model_sglang="Qwen3-8B",
+                recomputation_rate=recomputation_rate,
+                method_keyword="", preprocess=False,
+                use_weighted_diff_attention=True,
+                sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                fusion_rag_model=None, use_fusion_rag=False,
+            )
             for session_idx, turns in sample.conversation.sessions.items():
                 for turn in turns.turns:
-                    turn_datatime = turns.date_time
                     conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
-                    agent.add_memory(conversation_tmp, time=turn_datatime)
-                print(f"finish session {session_idx}")
+                    temp_agent.add_memory(conversation_tmp, time=turns.date_time)
 
-            memories_to_cache = agent.memory_system.memories
+            memories_to_cache = temp_agent.memory_system.memories
             with open(memory_cache_file, 'wb') as f:
                 pickle.dump(memories_to_cache, f)
-            agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
-            eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
+            temp_agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
+            eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories for sample {sample_idx}")
 
-        eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
-
-        print(f"full qa length={len(sample.qa)}")
-        # for qa in sample.qa:
+        # 2. 筛选出当前 Sample 未评估的 QA 任务
         qa_sub_list = sample_qa_by_ratio(
             qa_list=sample.qa,
             ratio=qa_ratio,
             allow_categories=allow_categories,
             seed=42,
         )
+
+        unprocessed_qas = []
         for qa in qa_sub_list:
             if int(qa.category) in allow_categories:
-                # --- 新增：判断是否已经评估过，若是则跳过 ---
                 if (sample_idx, qa.question) in processed_keys:
                     eval_logger.info(f"Skipping already evaluated question: {qa.question}")
                     continue
-                # ----------------------------------------
+                unprocessed_qas.append(qa)
 
-                total_questions += 1
-                category_counts[qa.category] += 1
+        if not unprocessed_qas:
+            continue
 
-                if use_fusion_rag:
-                    prediction, user_prompt, raw_context = agent.answer_question_fusionrag(
-                        qa.question, qa.category, qa.final_answer
-                    )
-                else:
-                    prediction, user_prompt, raw_context = agent.answer_question(
-                        qa.question, qa.category, qa.final_answer
-                    )
+        eval_logger.info(f"Submitting {len(unprocessed_qas)} QA tasks to workers for sample {sample_idx}")
 
-                # Parse the prediction (handles both JSON and plain text)
-                prediction = parse_plain_text_answer(prediction)
+        # 3. 将当前 Sample 的 QA 任务放入队列
+        for qa in unprocessed_qas:
+            qa_queue.put((sample_idx, qa))
 
-                eval_logger.info(f"Question {total_questions}: {qa.question}")
-                eval_logger.info(f"Prediction: {prediction}")
-                eval_logger.info(f"Reference: {qa.final_answer}")
-                eval_logger.info(f"User Prompt: {user_prompt}")
-                eval_logger.info(f"Category: {qa.category}")
-                eval_logger.info(f"Raw Context: {raw_context}")
+        # 4. 等待当前 Sample 的所有 QA 被所有 worker 消耗完毕
+        qa_queue.join()
 
-                metrics = calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
-                    "exact_match": 0, "f1": 0.0, "rouge1_f": 0.0, "rouge2_f": 0.0,
-                    "rougeL_f": 0.0, "bleu1": 0.0, "bleu2": 0.0, "bleu3": 0.0,
-                    "bleu4": 0.0, "bert_f1": 0.0, "meteor": 0.0, "sbert_similarity": 0.0
-                }
+        # 5. 主线程收集并写入当前 Sample 的所有评估结果
+        while not result_queue.empty():
+            result, metrics, category, log_payload = result_queue.get()
+            total_questions += 1
+            category_counts[category] += 1
+            all_metrics.append(metrics)
+            all_categories.append(category)
+            results.append(result)
 
-                all_metrics.append(metrics)
-                all_categories.append(qa.category)
+            eval_logger.info(f"Question {total_questions}: {log_payload['question']}")
+            eval_logger.info(f"Prediction: {log_payload['prediction']}")
+            eval_logger.info(f"Reference: {log_payload['reference']}")
+            eval_logger.info(f"User Prompt: {log_payload['user_prompt']}")
+            eval_logger.info(f"Category: {log_payload['category']}")
+            eval_logger.info(f"Raw Context: {log_payload['raw_context']}")
 
-                result = {
-                    "sample_id": sample_idx,
-                    "question": qa.question,
-                    "prediction": prediction,
-                    "reference": qa.final_answer,
-                    "category": qa.category,
-                    "metrics": metrics,
-                }
-                results.append(result)
+            with open(results_file, "w") as f:
+                json.dump(results, f, indent=4)
 
-                os.makedirs("./results", exist_ok=True)
-                with open(results_file, "w") as f:
-                    json.dump(results, f, indent=4)
+            if total_questions % 10 == 0:
+                eval_logger.info(f"Processed {total_questions} questions")
 
-                if total_questions % 10 == 0:
-                    eval_logger.info(f"Processed {total_questions} questions")
+    # 停止所有 Worker 线程
+    for _ in devices:
+        qa_queue.put(None)
+    for t in threads:
+        t.join()
 
     aggregate_results = aggregate_metrics(all_metrics, all_categories)
 
@@ -702,6 +793,8 @@ def main():
                         help="Path to the dataset file")
     parser.add_argument("--model", type=str, default="deepseek-v3.2",
                         help="Model to use")
+    parser.add_argument("--sglang_model", type=str, default="qwen2.5-7B",
+                        help="Model to use")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to save evaluation results")
     parser.add_argument("--skip_build", type=bool, default=False,
@@ -745,7 +838,8 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port, args.use_fusion_rag,
-        args.recomputation_rate, qa_ratio=args.qa_ratio,
+        args.recomputation_rate, qa_ratio=args.qa_ratio, devices=["cuda:0", "cuda:3", "cuda:4"],
+        sglang_model=args.sglang_model,
     )
 
 

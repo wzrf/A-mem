@@ -746,12 +746,12 @@ class FusionRAGModel:
             from ktransformers.models.modeling_qwen2 import Qwen2ForCausalLM
             torch.set_default_dtype(config.torch_dtype)
             with torch.no_grad():
-                model = Qwen2ForCausalLM.from_pretrained(model_path, **load_kwargs)
+                model = Qwen2ForCausalLM.from_pretrained(model_path, device_map=device, **load_kwargs)
         elif model_type == 'qwen3':
             from ktransformers.models.modeling_qwen3 import Qwen3ForCausalLM
             torch.set_default_dtype(config.torch_dtype)
             with torch.no_grad():
-                model = Qwen3ForCausalLM.from_pretrained(model_path, **load_kwargs)
+                model = Qwen3ForCausalLM.from_pretrained(model_path, device_map=device, **load_kwargs)
         elif model_type == 'llama':
             from ktransformers.models.modeling_llama import LlamaForCausalLM
             torch.set_default_dtype(config.torch_dtype)
@@ -767,8 +767,6 @@ class FusionRAGModel:
             print(f"\nModel loaded with device_map across GPUs:")
             for name, dev in device_map.items():
                 print(f"  {name}: {dev}")
-        else:
-            model = model.to(device)
 
         return model, device_map
 
