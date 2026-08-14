@@ -7,6 +7,7 @@ Usage:
     python test_advanced_robust.py --backend ollama --model qwen2.5:3b --dataset data/locomo10.json
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
 from sglang_kvcache import get_model_and_prompt, run_one_question_sglang, run_one_question_origin_sglang
 from llm_text_parsers import (
@@ -16,6 +17,7 @@ from llm_text_parsers import (
 )
 import platform
 import os
+import time
 import json
 import argparse
 import logging
@@ -36,6 +38,7 @@ from datetime import datetime
 import os
 import queue
 import threading
+from rag import retrieve_single_question_debug, init_locomo_indeces, OnlineEncoder
 
 # Download required NLTK data
 # try:
@@ -142,7 +145,10 @@ class RobustAdvancedMemAgent:
                  use_weighted_diff_attention=True,
                  sglang_url="",
                  sglang_url_prefiller="",
-                 use_fusion_rag=False
+                 use_fusion_rag=False,
+                 encoder=None,
+                 rag_indices=None,
+                 rag_id2texts=None
                  ):
 
         if use_fusion_rag:
@@ -156,6 +162,9 @@ class RobustAdvancedMemAgent:
             self.sglang_url_prefiller = sglang_url_prefiller
         else:
             self.fusion_rag_model = None
+        self.encoder = encoder
+        self.rag_indices = rag_indices
+        self.rag_id2texts = rag_id2texts
 
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
@@ -255,11 +264,21 @@ Question: {question} Short answer:"""
         return response, user_prompt, raw_context, raw_context_list
 
 
-    def answer_question_fusionrag(self, question: str, category: int, answer: str) -> tuple:
+    def answer_question_fusionrag(self, question: str, category: int, answer: str, use_rag: bool, sample_idx: int) -> tuple:
         """Generate answer for a question — plain text, no JSON schema."""
-        keywords = self.generate_query_llm(question)
-        raw_context, raw_context_list = self.retrieve_memory(keywords, k=self.retrieve_k)
-        context = raw_context
+        if not use_rag:
+            keywords = self.generate_query_llm(question)
+            raw_context, raw_context_list = self.retrieve_memory(keywords, k=self.retrieve_k)
+            context = raw_context
+        else:
+            raw_context_list = retrieve_single_question_debug(
+                question=question,
+                index=self.rag_indices[sample_idx],
+                id2text=self.rag_id2texts[sample_idx],
+                encoder=self.encoder,
+                topk=15,
+            )
+            raw_context = "\n".join(raw_context_list)
 
         _, DEFAULT_SYSTEM_PROMPT, _ = get_model_and_prompt(model=self.model_sglang)
         DEFAULT_SYSTEM_PROMPT += "Based on the context: "
@@ -294,6 +313,7 @@ Question: {question} Short answer:"""
 
 
         query_draft = user_prompt.format(question=question)
+        time_start = time.time()
         if self.recomputation_rate < 1.0:
             recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before, recompute_indices = self.fusion_rag_model.draft_one_question(
                 DEFAULT_SYSTEM_PROMPT,  ## DEFAULT_SYSTEM_PROMPT
@@ -309,6 +329,7 @@ Question: {question} Short answer:"""
                 False,
                 True
             )
+            time_end = time.time()
 
             content, usage, top_logprobs, real_recomputation_rate = run_one_question_sglang(
                 query_draft,
@@ -325,6 +346,7 @@ Question: {question} Short answer:"""
                 self.method_keyword,
                 recompute_indices=recompute_indices,
             )
+            print(f"time_draft={time_end-time_start}, time_run={time.time()-time_end}")
         else:
             content, usage, top_logprobs, real_recomputation_rate = run_one_question_origin_sglang(
                 query_prompt=query_draft,
@@ -333,6 +355,7 @@ Question: {question} Short answer:"""
                 model_use=self.model_sglang,
                 endpoint_url=self.sglang_url,
             )
+            print(f"time_run={time.time() - time_start}")
         if "</think>" in content:
             content = content.split("</think>")[1].strip()
         return content, user_prompt, raw_context, raw_context_list
@@ -480,6 +503,12 @@ def evaluate_dataset(
     qa_ratio=1.0,
     devices: Optional[List[str]] = None,  # 设备列表，如 ["cuda:0", "cuda:1"]
     sglang_model="",
+    sglang_url="",
+    sglang_url_prefiller="",
+    draft_model_path="",
+    draft_model_type="",
+    draft_model_name="",
+    use_rag=False,
 ):
     """Evaluate the robust agent with fine-grained (per-QA) parallelism."""
     if devices is None:
@@ -510,8 +539,10 @@ def evaluate_dataset(
 
     # --- 检查并读取已有的结果文件 ---
     fusion_rag_tag = "fusion_rag" if use_fusion_rag else ""
+    rag_tag = "_simplerag" if use_rag else ""
     os.makedirs("./results", exist_ok=True)
-    results_file = f"./results/result_{fusion_rag_tag}_{recomputation_rate}_{sglang_model}_retrieve_{retrieve_k}.json"
+    results_file = f"./results/result{rag_tag}_{fusion_rag_tag}_{recomputation_rate}_{draft_model_name}_{sglang_model}_retrieve_{retrieve_k}.json"
+    print(f"results_file={results_file}")
     processed_keys = set()
 
     if os.path.exists(results_file):
@@ -537,46 +568,15 @@ def evaluate_dataset(
     os.makedirs(memories_dir, exist_ok=True)
     allow_categories = [1, 2, 3, 4]
 
-    sapphire3_ip = "192.168.200.15"
-    sapphire3_prefiller_port = 30003
     SYSTEM_ = platform.system().lower()
 
     # --- 任务队列与结果队列 ---
     qa_queue = queue.Queue()
     result_queue = queue.Queue()
 
-    def worker_loop(device_str: str):
-        """Worker 线程：在指定 GPU 上处理单个 QA 任务"""
-        with MODEL_LOAD_LOCK:
-            if SYSTEM_ == "linux" and use_fusion_rag:
-                fusion_rag_model = FusionRAGModel(
-                    device=device_str,
-                    draft_model_device=device_str,
-                    draft_model_path='/mnt/data/models/Qwen2.5-3B-Instruct',
-                    draft_model_type="qwen",
-                    draft_model_name="Qwen2.5-3B-Instruct",
-                    model_path="",
-                    cache_path="",
-                    preprocess=False,
-                    apikey="xxx",
-                )
-            else:
-                fusion_rag_model = None
-
-            agent = RobustAdvancedMemAgent(
-                model, backend, retrieve_k, temperature_c5,
-                sglang_host, sglang_port,
-                model_sglang="Qwen3-8B",
-                recomputation_rate=recomputation_rate,
-                method_keyword="",
-                preprocess=False,
-                use_weighted_diff_attention=True,
-                sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-                sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-                fusion_rag_model=fusion_rag_model,
-                use_fusion_rag=use_fusion_rag,
-            )
-
+    # --- Worker 线程逻辑（仅接收已初始化的 agent 对象） ---
+    def worker_loop(agent: RobustAdvancedMemAgent):
+        """Worker 线程：直接使用传入的 Agent 处理 QA 任务"""
         current_sample_idx = -1  # 记录当前 Agent 加载的 Sample
 
         while True:
@@ -612,7 +612,7 @@ def evaluate_dataset(
             # 评估单个 QA
             if use_fusion_rag:
                 prediction, user_prompt, raw_context, raw_context_list = agent.answer_question_fusionrag(
-                    qa.question, qa.category, qa.final_answer
+                    qa.question, qa.category, qa.final_answer, use_rag, sample_idx
                 )
             else:
                 prediction, user_prompt, raw_context, raw_context_list = agent.answer_question(
@@ -649,11 +649,44 @@ def evaluate_dataset(
             result_queue.put((result, metrics, qa.category, log_payload))
             qa_queue.task_done()
 
-    # 启动工作线程
+    # --- 在主线程中初始化所有设备的 Agent 并启动工作线程 ---
     threads = []
-    MODEL_LOAD_LOCK = threading.Lock()
     for dev in devices:
-        t = threading.Thread(target=worker_loop, args=(dev,))
+        eval_logger.info(f"Initializing agent on device: {dev}...")
+        if SYSTEM_ == "linux" and use_fusion_rag:
+            fusion_rag_model = FusionRAGModel(
+                device=dev,
+                draft_model_device=dev,
+                draft_model_path=draft_model_path,
+                draft_model_type=draft_model_type,
+                draft_model_name=draft_model_name,
+                model_path="",
+                cache_path="",
+                preprocess=False,
+                apikey="xxx",
+            )
+        else:
+            fusion_rag_model = None
+
+        rag_indices, rag_id2texts = init_locomo_indeces()
+        agent = RobustAdvancedMemAgent(
+            model, backend, retrieve_k, temperature_c5,
+            sglang_host, sglang_port,
+            model_sglang="Qwen3-8B",
+            recomputation_rate=recomputation_rate,
+            method_keyword="",
+            preprocess=False,
+            use_weighted_diff_attention=True,
+            sglang_url=sglang_url,
+            sglang_url_prefiller=sglang_url_prefiller,
+            fusion_rag_model=fusion_rag_model,
+            use_fusion_rag=use_fusion_rag,
+            encoder=OnlineEncoder(),
+            rag_indices=rag_indices,
+            rag_id2texts=rag_id2texts,
+        )
+
+        t = threading.Thread(target=worker_loop, args=(agent, ))
         t.start()
         threads.append(t)
 
@@ -677,8 +710,8 @@ def evaluate_dataset(
                 recomputation_rate=recomputation_rate,
                 method_keyword="", preprocess=False,
                 use_weighted_diff_attention=True,
-                sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-                sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
+                sglang_url=sglang_url,
+                sglang_url_prefiller=sglang_url_prefiller,
                 fusion_rag_model=None, use_fusion_rag=False,
             )
             for session_idx, turns in sample.conversation.sessions.items():
@@ -784,7 +817,6 @@ def evaluate_dataset(
 
     return final_results
 
-
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate robust text-only agent on LoComo dataset (no JSON schema dependency)"
@@ -794,13 +826,17 @@ def main():
     parser.add_argument("--model", type=str, default="deepseek-v3.2",
                         help="Model to use")
     parser.add_argument("--sglang_model", type=str, default="qwen2.5-7B",
-                        help="Model to use")
+                        help="Model to use for fusionrag")
+    parser.add_argument("--draft_model", type=str, default="qwen2.5-3B",
+                        help="Model to use draft")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to save evaluation results")
     parser.add_argument("--skip_build", type=bool, default=False,
                         help="skip parallel build")
-    parser.add_argument("--use_fusion_rag", type=bool, default=False,
+    parser.add_argument("--use_fusion_rag", type=str, default="false",
                         help="use fusion rag or not")
+    parser.add_argument("--use_rag", type=str, default="false",
+                        help="use rag or not")
     parser.add_argument("--recomputation_rate", type=float, default=0.3,
                         help="recomputation rate for fusionrag")
     parser.add_argument("--ratio", type=float, default=1.0,
@@ -825,7 +861,30 @@ def main():
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
 
+    args.use_fusion_rag = args.use_fusion_rag.lower() == "true"
+    args.use_rag = args.use_rag.lower() == "true"
     print(f"use_fusion_rag= {args.use_fusion_rag}")
+
+    sapphire3_ip = "192.168.200.15"
+    sapphire3_port_qwen25_7b = 30003
+
+    if "qwen2.5-7B".lower() in args.sglang_model.lower():
+        sglang_url = sglang_url_prefiller = f"http://{sapphire3_ip}:{sapphire3_port_qwen25_7b}/v1/completions"
+    else:
+        print(f"unknown sglang model")
+        exit(0)
+
+    if "qwen2.5-3b".lower() in args.draft_model.lower():
+        draft_model_path = '/mnt/data/models/Qwen2.5-3B-Instruct'
+        draft_model_type = "qwen"
+        draft_model_name = "Qwen2.5-3B-Instruct"
+    elif "qwen2.5-1.5b".lower() in args.draft_model.lower():
+        draft_model_path = '/mnt/data/models/Qwen2.5-1.5B-Instruct'
+        draft_model_type = "qwen"
+        draft_model_name = "Qwen2.5-1.5B-Instruct"
+    else:
+        print(f"unknown draft model")
+        exit(0)
 
     if not args.skip_build:
         build_memory(
@@ -838,8 +897,14 @@ def main():
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,
         args.sglang_host, args.sglang_port, args.use_fusion_rag,
-        args.recomputation_rate, qa_ratio=args.qa_ratio, devices=["cuda:0", "cuda:3", "cuda:4"],
+        args.recomputation_rate, qa_ratio=args.qa_ratio, devices=["cuda:0", "cuda:3", "cuda:4", "cuda:0", "cuda:3", "cuda:4"],
         sglang_model=args.sglang_model,
+        sglang_url=sglang_url,
+        sglang_url_prefiller=sglang_url_prefiller,
+        draft_model_path=draft_model_path,
+        draft_model_type=draft_model_type,
+        draft_model_name=draft_model_name,
+        use_rag=args.use_rag,
     )
 
 

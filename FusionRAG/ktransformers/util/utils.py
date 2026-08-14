@@ -579,7 +579,8 @@ def compute_draft_model_attention(draft_model, input_ids, device="cuda:0", debug
         causal_mask = torch.triu(torch.ones(q_len, q_len, device=device), diagonal=1).bool()
 
         for layer_idx in range(num_layers):
-            torch.cuda.empty_cache()
+            ##mengyao_debug 这个会清理显存，但是会变得非常的慢
+            # torch.cuda.empty_cache()
             time_start=time.time()
             layer = draft_model.model.layers[layer_idx]
 
@@ -625,7 +626,7 @@ def compute_draft_model_attention(draft_model, input_ids, device="cuda:0", debug
                 if layer_idx >= num_layers // 2:
                 # if layer_idx >= 0:
                     ## make everything faster
-                    attn_score = attn_weights[0].mean(dim=0)[query_start:total_len, system_len:system_len + doc_len].detach().cpu()
+                    attn_score = attn_weights[0].mean(dim=0)[query_start:total_len, system_len:system_len + doc_len] ##mengyao_debug .detach().cpu()
                     if reverse:
                         layer_attention_scores[layer_idx] = attn_score.mean(dim=1) ## attn_weights: 1,16,seq_len, seq_len
                     else:
@@ -636,9 +637,11 @@ def compute_draft_model_attention(draft_model, input_ids, device="cuda:0", debug
                 time_forward = time.time()
                 # Continue forward
                 attn_output = torch.matmul(attn_weights.to(value_states_expanded.dtype), value_states_expanded)
-                del attn_weights
-                gc.collect()
-                torch.cuda.empty_cache()
+
+                ##mengyao_debug 这个会清理显存，但是会变得非常的慢
+                # del attn_weights
+                # gc.collect()
+                # torch.cuda.empty_cache()
             else:
                 attn_output = F.scaled_dot_product_attention(
                     query_states, key_states_expanded, value_states_expanded,
