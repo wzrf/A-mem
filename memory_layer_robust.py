@@ -121,6 +121,19 @@ class RobustOpenAIController(RobustBaseLLMController):
         )
         return response.choices[0].message.content
 
+    @retry_llm_call(max_retries=2)
+    def get_completion_with_token(self, prompt: str, temperature: float = 0.7) -> (str, int, int):
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self.SYSTEM_MESSAGE},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            max_tokens=1000,
+        )
+        return response.choices[0].message.content, response.usage.prompt_tokens, response.usage.completion_tokens
+
 
 class RobustOllamaController(RobustBaseLLMController):
     """Direct Ollama library controller (no LiteLLM proxy)."""
@@ -375,7 +388,7 @@ class RobustAgenticMemorySystem:
 
     # ---- public API (mirrors AgenticMemorySystem) ----
 
-    def add_note(self, content: str, time: str = None, **kwargs) -> str:
+    def add_note(self, content: str, time: str = None, **kwargs) -> (str, int, int):
         """Add a new memory note."""
         note = RobustMemoryNote(
             content=content,
@@ -383,7 +396,7 @@ class RobustAgenticMemorySystem:
             timestamp=time,
             **kwargs,
         )
-        evo_label, note = self.process_memory(note)
+        evo_label, note, prompt_tokens, completion_tokens = self.process_memory(note)
         self.memories[note.id] = note
         self.retriever.add_documents([
             "content:" + note.content +
@@ -395,7 +408,7 @@ class RobustAgenticMemorySystem:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
                 self.consolidate_memories()
-        return note.id
+        return note.id, prompt_tokens, completion_tokens
 
     def consolidate_memories(self):
         """Re-initialize the retriever with current memory state."""
@@ -481,9 +494,11 @@ class RobustAgenticMemorySystem:
           3. Update neighbors (skip if no update)
         """
         neighbor_memory, indices = self.find_related_memories(note.content, k=5)
+        prompt_tokens = 0
+        completion_tokens = 0
 
         if len(indices) == 0:
-            return False, note
+            return False, note, 0, 0
 
         try:
             # ---- Call 1: Evolution decision ----
@@ -493,12 +508,14 @@ class RobustAgenticMemorySystem:
                 keywords=note.keywords,
                 nearest_neighbors_memories=neighbor_memory,
             )
-            decision_response = self.llm_controller.llm.get_completion(decision_prompt)
+            decision_response, prompt_tokens_1, completion_tokens_1 = self.llm_controller.llm.get_completion_with_token(decision_prompt)
+            prompt_tokens += prompt_tokens_1
+            completion_tokens += completion_tokens_1
             decision = parse_evolution_decision(decision_response)
             logger.debug("Evolution decision: %s", decision)
 
             if decision["decision"] == "NO_EVOLUTION":
-                return False, note
+                return False, note, 0, 0
 
             should_strengthen = decision["decision"] in ("STRENGTHEN", "STRENGTHEN_AND_UPDATE")
             should_update = decision["decision"] in ("UPDATE_NEIGHBOR", "STRENGTHEN_AND_UPDATE")
@@ -510,7 +527,9 @@ class RobustAgenticMemorySystem:
                     keywords=note.keywords,
                     nearest_neighbors_memories=neighbor_memory,
                 )
-                strengthen_response = self.llm_controller.llm.get_completion(strengthen_prompt)
+                strengthen_response, prompt_tokens_2, completion_tokens_2 = self.llm_controller.llm.get_completion_with_token(strengthen_prompt)
+                prompt_tokens += prompt_tokens_2
+                completion_tokens += completion_tokens_2
                 strengthen = parse_strengthen_details(strengthen_response)
                 logger.debug("Strengthen details: %s", strengthen)
 
@@ -527,7 +546,9 @@ class RobustAgenticMemorySystem:
                     max_neighbor_idx=len(indices) - 1,
                     neighbor_count=len(indices),
                 )
-                update_response = self.llm_controller.llm.get_completion(update_prompt)
+                update_response, prompt_tokens_3, completion_tokens_3 = self.llm_controller.llm.get_completion_with_token(update_prompt)
+                prompt_tokens += prompt_tokens_3
+                completion_tokens += completion_tokens_3
                 neighbor_updates = parse_update_neighbors(update_response, len(indices))
                 logger.debug("Neighbor updates: %s", neighbor_updates)
 
@@ -545,8 +566,8 @@ class RobustAgenticMemorySystem:
                         notetmp.context = upd["context"]
                     self.memories[notes_id[memorytmp_idx]] = notetmp
 
-            return True, note
+            return True, note, prompt_tokens, completion_tokens
 
         except Exception as e:
             logger.error("Evolution failed for note %s: %s — storing without evolution", note.id, e)
-            return False, note
+            return False, note, prompt_tokens, completion_tokens

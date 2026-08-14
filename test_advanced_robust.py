@@ -38,7 +38,6 @@ from datetime import datetime
 import os
 import queue
 import threading
-from rag import retrieve_single_question_debug, init_locomo_indeces, OnlineEncoder
 
 # Download required NLTK data
 # try:
@@ -56,7 +55,6 @@ except Exception as e:
     sentence_model = None
 
 logger = logging.getLogger("amem_robust")
-from FusionRAG.run_question import FusionRAGModel
 
 import random
 from collections import defaultdict
@@ -148,7 +146,8 @@ class RobustAdvancedMemAgent:
                  use_fusion_rag=False,
                  encoder=None,
                  rag_indices=None,
-                 rag_id2texts=None
+                 rag_id2texts=None,
+                 token_consumption_file=""
                  ):
 
         if use_fusion_rag:
@@ -165,6 +164,8 @@ class RobustAdvancedMemAgent:
         self.encoder = encoder
         self.rag_indices = rag_indices
         self.rag_id2texts = rag_id2texts
+        self.tokens_comsumption = []
+        self.token_consumption_file = token_consumption_file
 
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
@@ -184,7 +185,18 @@ class RobustAdvancedMemAgent:
         self.temperature_c5 = temperature_c5
 
     def add_memory(self, content, time=None):
-        self.memory_system.add_note(content, time=time)
+        _, prompt_tokens, completion_tokens = self.memory_system.add_note(content, time=time)
+        self.tokens_comsumption.append(
+            {
+                "content": content,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        )
+        if self.token_consumption_file != "":
+            with open(self.token_consumption_file, "w") as f:
+                json.dump(self.tokens_comsumption, f, indent=4)
+
 
     def retrieve_memory(self, content, k=10):
         return self.memory_system.find_related_memories_raw(content, k=k)
@@ -271,6 +283,7 @@ Question: {question} Short answer:"""
             raw_context, raw_context_list = self.retrieve_memory(keywords, k=self.retrieve_k)
             context = raw_context
         else:
+            from rag import retrieve_single_question_debug
             raw_context_list = retrieve_single_question_debug(
                 question=question,
                 index=self.rag_indices[sample_idx],
@@ -383,7 +396,7 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
                  ratio: float = 1.0, backend: str = "sglang",
                  temperature_c5: float = 0.5, retrieve_k: int = 10,
                  sglang_host: str = "http://localhost", sglang_port: int = 30000,
-                 max_workers: int = 16):
+                 max_workers: int = 1):
     """Evaluate the robust agent on the LoComo dataset using multi-threading."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
@@ -416,6 +429,8 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
         """单样本处理函数（运行在独立线程中）"""
         prefix = f"[Sample {sample_idx + 1}/{len(samples)}]"
 
+        token_consumption_file = f"./token_consumption/{sample_idx}.json"
+
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5,
             sglang_host, sglang_port,
@@ -425,7 +440,8 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
             use_weighted_diff_attention=True,
             sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
             sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
-            fusion_rag_model=fusion_rag_model
+            fusion_rag_model=fusion_rag_model,
+            token_consumption_file=token_consumption_file
         )
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
@@ -654,6 +670,7 @@ def evaluate_dataset(
     for dev in devices:
         eval_logger.info(f"Initializing agent on device: {dev}...")
         if SYSTEM_ == "linux" and use_fusion_rag:
+            from FusionRAG.run_question import FusionRAGModel
             fusion_rag_model = FusionRAGModel(
                 device=dev,
                 draft_model_device=dev,
@@ -668,6 +685,7 @@ def evaluate_dataset(
         else:
             fusion_rag_model = None
 
+        from rag import init_locomo_indeces, OnlineEncoder
         rag_indices, rag_id2texts = init_locomo_indeces()
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5,
@@ -892,20 +910,20 @@ def main():
             args.backend, args.temperature_c5, args.retrieve_k,
             args.sglang_host, args.sglang_port,
         )
-
-    evaluate_dataset(
-        dataset_path, args.model, output_path, args.ratio,
-        args.backend, args.temperature_c5, args.retrieve_k,
-        args.sglang_host, args.sglang_port, args.use_fusion_rag,
-        args.recomputation_rate, qa_ratio=args.qa_ratio, devices=["cuda:0", "cuda:3", "cuda:4", "cuda:0", "cuda:3", "cuda:4"],
-        sglang_model=args.sglang_model,
-        sglang_url=sglang_url,
-        sglang_url_prefiller=sglang_url_prefiller,
-        draft_model_path=draft_model_path,
-        draft_model_type=draft_model_type,
-        draft_model_name=draft_model_name,
-        use_rag=args.use_rag,
-    )
+    else:
+        evaluate_dataset(
+            dataset_path, args.model, output_path, args.ratio,
+            args.backend, args.temperature_c5, args.retrieve_k,
+            args.sglang_host, args.sglang_port, args.use_fusion_rag,
+            args.recomputation_rate, qa_ratio=args.qa_ratio, devices=["cuda:0", "cuda:3", "cuda:4", "cuda:0", "cuda:3", "cuda:4"],
+            sglang_model=args.sglang_model,
+            sglang_url=sglang_url,
+            sglang_url_prefiller=sglang_url_prefiller,
+            draft_model_path=draft_model_path,
+            draft_model_type=draft_model_type,
+            draft_model_name=draft_model_name,
+            use_rag=args.use_rag,
+        )
 
 
 if __name__ == "__main__":
