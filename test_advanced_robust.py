@@ -188,7 +188,7 @@ class RobustAdvancedMemAgent:
         _, prompt_tokens, completion_tokens = self.memory_system.add_note(content, time=time)
         self.tokens_comsumption.append(
             {
-                "content": content,
+                # "content": content,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
             }
@@ -429,7 +429,7 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
         """单样本处理函数（运行在独立线程中）"""
         prefix = f"[Sample {sample_idx + 1}/{len(samples)}]"
 
-        token_consumption_file = f"./token_consumption/{sample_idx}.json"
+        token_consumption_file = f"./token_consumption/locomo_{sample_idx}.json"
 
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5,
@@ -475,7 +475,7 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
                     turn_datatime = turns.date_time
                     conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
                     agent.add_memory(conversation_tmp, time=turn_datatime)
-                    print(f"{prefix} finish turn {turx_idx}/{len(turns.turns)}")
+                    # print(f"{prefix} finish turn {turx_idx}/{len(turns.turns)}")
                 print(f"{prefix} finish session {session_idx}")
 
             memories_to_cache = agent.memory_system.memories
@@ -907,7 +907,9 @@ def main():
         exit(0)
 
     ##mengyao_debug max_workers
-    MAX_WORKERS = 8
+    MAX_WORKERS = 10
+    if os.environ.get('DEBUG') == "1":
+        MAX_WORKERS = 1
 
     ## 是否只是build
     if not args.skip_build:

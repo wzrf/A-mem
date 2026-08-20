@@ -66,8 +66,11 @@ def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
         if os.path.exists(memory_cache_file):
             return
 
+        token_consumption_file = f"./token_consumption/longmemeval_{sample.question_id}.json"
+
         agent = RobustAdvancedMemAgent(
-            model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port
+            model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port,
+            token_consumption_file=token_consumption_file
         )
 
         # 遍历会话与时间戳入库
@@ -203,6 +206,8 @@ def main():
     samples = load_longmemeval_dataset(args.dataset)
     devices = ["cuda:0"]
     MAX_WORKERS = 64 ##mengyao_debug
+    if os.environ.get('DEBUG') == "1":
+        MAX_WORKERS = 1
 
     if not args.skip_build:
         print("Building memories for LongMemEval...")
