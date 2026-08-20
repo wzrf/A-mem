@@ -19,7 +19,7 @@ import json as json_lib
 import time
 
 EMBEDDING_MODEL = SentenceTransformer(
-    'all-MiniLM-L6-v2'
+    '/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2'
 )
 
 def simple_tokenize(text):

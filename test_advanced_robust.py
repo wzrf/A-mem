@@ -49,7 +49,7 @@ import threading
 
 # Initialize SentenceTransformer model (this will be reused)
 try:
-    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    sentence_model = SentenceTransformer('/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2')
 except Exception as e:
     print(f"Warning: Could not load SentenceTransformer model: {e}")
     sentence_model = None
@@ -273,7 +273,7 @@ Question: {question} Short answer:"""
         except Exception as e:
             logger.warning("answer_question failed: %s — returning empty", e)
             response = ""
-        return response, user_prompt, raw_context, raw_context_list
+        return response, user_prompt, raw_context, raw_context_list, response["usage"]["prompt_tokens"], response["usage"]["completion_tokens"]
 
 
     def answer_question_fusionrag(self, question: str, category: int, answer: str, use_rag: bool, sample_idx: int) -> tuple:
@@ -371,7 +371,7 @@ Question: {question} Short answer:"""
             print(f"time_run={time.time() - time_start}")
         if "</think>" in content:
             content = content.split("</think>")[1].strip()
-        return content, user_prompt, raw_context, raw_context_list
+        return content, user_prompt, raw_context, raw_context_list, usage["prompt_tokens"], usage["completion_tokens"]
 
 
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
@@ -627,11 +627,11 @@ def evaluate_dataset(
 
             # 评估单个 QA
             if use_fusion_rag:
-                prediction, user_prompt, raw_context, raw_context_list = agent.answer_question_fusionrag(
+                prediction, user_prompt, raw_context, raw_context_list, prompt_tokens, completion_tokens = agent.answer_question_fusionrag(
                     qa.question, qa.category, qa.final_answer, use_rag, sample_idx
                 )
             else:
-                prediction, user_prompt, raw_context, raw_context_list = agent.answer_question(
+                prediction, user_prompt, raw_context, raw_context_list, prompt_tokens, completion_tokens = agent.answer_question(
                     qa.question, qa.category, qa.final_answer
                 )
             print(f"prediction={prediction}")
@@ -651,6 +651,8 @@ def evaluate_dataset(
                 "category": qa.category,
                 "metrics": metrics,
                 "raw_context_len": len(raw_context_list),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens
             }
 
             log_payload = {
@@ -841,7 +843,7 @@ def main():
     )
     parser.add_argument("--dataset", type=str, default="data/locomo10.json",
                         help="Path to the dataset file")
-    parser.add_argument("--model", type=str, default="deepseek-v3.2",
+    parser.add_argument("--model", type=str, default="qwen3-8b",
                         help="Model to use")
     parser.add_argument("--sglang_model", type=str, default="qwen2.5-7B",
                         help="Model to use for fusionrag")
@@ -904,26 +906,32 @@ def main():
         print(f"unknown draft model")
         exit(0)
 
+    ##mengyao_debug max_workers
+    MAX_WORKERS = 8
+
+    ## 是否只是build
     if not args.skip_build:
         build_memory(
             dataset_path, args.model, output_path, args.ratio,
             args.backend, args.temperature_c5, args.retrieve_k,
-            args.sglang_host, args.sglang_port,
+            args.sglang_host, args.sglang_port, max_workers=MAX_WORKERS
         )
-    else:
-        evaluate_dataset(
-            dataset_path, args.model, output_path, args.ratio,
-            args.backend, args.temperature_c5, args.retrieve_k,
-            args.sglang_host, args.sglang_port, args.use_fusion_rag,
-            args.recomputation_rate, qa_ratio=args.qa_ratio, devices=["cuda:0", "cuda:3", "cuda:4", "cuda:0", "cuda:3", "cuda:4"],
-            sglang_model=args.sglang_model,
-            sglang_url=sglang_url,
-            sglang_url_prefiller=sglang_url_prefiller,
-            draft_model_path=draft_model_path,
-            draft_model_type=draft_model_type,
-            draft_model_name=draft_model_name,
-            use_rag=args.use_rag,
-        )
+
+    devices = ["cuda:1"]
+    # devices = ["cuda:0"]
+    evaluate_dataset(
+        dataset_path, args.model, output_path, args.ratio,
+        args.backend, args.temperature_c5, args.retrieve_k,
+        args.sglang_host, args.sglang_port, args.use_fusion_rag,
+        args.recomputation_rate, qa_ratio=args.qa_ratio, devices=devices,
+        sglang_model=args.sglang_model,
+        sglang_url=sglang_url,
+        sglang_url_prefiller=sglang_url_prefiller,
+        draft_model_path=draft_model_path,
+        draft_model_type=draft_model_type,
+        draft_model_name=draft_model_name,
+        use_rag=args.use_rag,
+    )
 
 
 if __name__ == "__main__":

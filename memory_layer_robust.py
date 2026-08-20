@@ -95,7 +95,7 @@ class RobustBaseLLMController(ABC):
 
 
 class RobustOpenAIController(RobustBaseLLMController):
-    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None):
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, sglang_host: str="", sglang_port: int=0) -> None:
         try:
             from openai import OpenAI
         except ImportError:
@@ -105,7 +105,10 @@ class RobustOpenAIController(RobustBaseLLMController):
             api_key = os.getenv('OPENAI_API_KEY')
         if api_key is None:
             raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
-        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        if sglang_host == "":
+            base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        else:
+            base_url = f"{sglang_host}:{sglang_port}/v1"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     @retry_llm_call(max_retries=2)
@@ -118,6 +121,9 @@ class RobustOpenAIController(RobustBaseLLMController):
             ],
             temperature=temperature,
             max_tokens=1000,
+            extra_body={
+                "enable_thinking": False
+            },
         )
         return response.choices[0].message.content
 
@@ -131,6 +137,11 @@ class RobustOpenAIController(RobustBaseLLMController):
             ],
             temperature=temperature,
             max_tokens=1000,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                }
+            },
         )
         return response.choices[0].message.content, response.usage.prompt_tokens, response.usage.completion_tokens
 
@@ -185,6 +196,40 @@ class RobustSGLangController(RobustBaseLLMController):
         if response.status_code == 200:
             return response.json().get("text", "")
         raise RuntimeError(f"SGLang server returned status {response.status_code}: {response.text}")
+
+    # @retry_llm_call(max_retries=2)
+    # def get_completion_with_token(
+    #         self, prompt: str, temperature: float = 0.7
+    # ) -> tuple[str, int, int]:
+    #     payload = {
+    #         "text": prompt,
+    #         "sampling_params": {
+    #             "temperature": temperature,
+    #             "max_new_tokens": 1000,
+    #             "no_think": True,  # 禁用 SGLang / DeepSeek-R1 的思考链输出
+    #         },
+    #     }
+    #     response = self._requests.post(
+    #         f"{self.base_url}/generate",
+    #         headers={"Content-Type": "application/json"},
+    #         json=payload,
+    #         timeout=60,
+    #     )
+    #     if response.status_code == 200:
+    #         data = response.json()
+    #         # SGLang 原生接口在根节点或 meta_info 中返回 token 统计
+    #         prompt_tokens = data.get("prompt_tokens", 0) or data.get(
+    #             "meta_info", {}
+    #         ).get("prompt_tokens", 0)
+    #         completion_tokens = data.get("completion_tokens", 0) or data.get(
+    #             "meta_info", {}
+    #         ).get("completion_tokens", 0)
+    #
+    #         return data.get("text", ""), prompt_tokens, completion_tokens
+    #
+    #     raise RuntimeError(
+    #         f"SGLang server returned status {response.status_code}: {response.text}"
+    #     )
 
 
 class RobustVLLMController(RobustBaseLLMController):
@@ -266,7 +311,7 @@ class RobustLLMController:
                  sglang_port: int = 30000,
                  check_connection: bool = False):
         if backend == "openai":
-            self.llm = RobustOpenAIController(model, api_key)
+            self.llm = RobustOpenAIController(model, api_key, sglang_host, sglang_port)
         elif backend == "ollama":
             self.llm = RobustOllamaController(model)
         elif backend == "sglang":
@@ -304,8 +349,10 @@ class RobustMemoryNote:
 
         self.content = content
 
+        self.init_prompt_tokens = 0
+        self.init_completion_tokens = 0
         if llm_controller and any(p is None for p in [keywords, context, category, tags]):
-            analysis = self.analyze_content(content, llm_controller)
+            analysis, self.init_prompt_tokens, self.init_completion_tokens = self.analyze_content(content, llm_controller)
             logger.debug("analysis result: %s", analysis)
             keywords = keywords or analysis["keywords"]
             context = context or analysis["context"]
@@ -328,12 +375,13 @@ class RobustMemoryNote:
         self.category = category or "Uncategorized"
         self.tags = tags or []
 
+
     @staticmethod
-    def analyze_content(content: str, llm_controller: RobustLLMController) -> Dict:
+    def analyze_content(content: str, llm_controller: RobustLLMController) -> (Dict, int, int):
         """Analyze content using plain-text prompt + section-marker parsing."""
         prompt = ANALYZE_CONTENT_PROMPT.format(content=content)
         try:
-            response = llm_controller.llm.get_completion(prompt)
+            response, prompt_tokens, completion_tokens = llm_controller.llm.get_completion_with_token(prompt)
             analysis = parse_analyze_content(response, content)
 
             # If keywords still empty after parsing, try focused retry
@@ -346,7 +394,7 @@ class RobustMemoryNote:
 
             # Final validation
             analysis = validate_analysis_result(analysis, content)
-            return analysis
+            return analysis, prompt_tokens, completion_tokens
 
         except Exception as e:
             logger.error("Error analyzing content: %s", e)
@@ -356,7 +404,7 @@ class RobustMemoryNote:
                 "keywords": _heuristic_keywords(content),
                 "context": _heuristic_context(content),
                 "tags": _heuristic_keywords(content, 3),
-            }
+            }, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +456,7 @@ class RobustAgenticMemorySystem:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
                 self.consolidate_memories()
-        return note.id, prompt_tokens, completion_tokens
+        return note.id, note.init_prompt_tokens + prompt_tokens, note.init_completion_tokens + completion_tokens
 
     def consolidate_memories(self):
         """Re-initialize the retriever with current memory state."""

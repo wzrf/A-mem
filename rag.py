@@ -169,11 +169,11 @@ def init_locomo_indeces():
     docs_paths = []
     for i in range(10):
         keywords.append(f"locomo_input_{i}")
-        docs_paths.append(f"./data/input/locomo/locomo_input_{i}.json")
+        docs_paths.append(f"./data/input/locomo_short/locomo_input_{i}.json")
 
     for idx, docs_path in enumerate(docs_paths):
         keyword = keywords[idx]
-        os.makedirs(f"../../data/simplerag/{keyword}", exist_ok=True)
+        os.makedirs(f"./data/simplerag/{keyword}", exist_ok=True)
         index, id2text = load_or_build_index(docs_path, encoder, keyword)
         indeces.append(index)
         id2texts.append(id2text)

@@ -203,7 +203,8 @@ def run_gen(prompt: str, prefix_prompt:str, max_tokens:int, rope:bool, use_fusio
             prompt_list: list[str], prefix_prompt_list: list[str], endpoint_url: str,
             preprocess_cache_key_list: list[str]=None,
             cache_is_preprocess_list: list[bool]=None,
-            recompute_indices: list[int]=None,) :
+            recompute_indices: list[int]=None,
+            recompute_tokens_list: list[list[str]]=None) :
     url = endpoint_url
     headers = {
         "Content-Type": "application/json"
@@ -236,6 +237,8 @@ def run_gen(prompt: str, prefix_prompt:str, max_tokens:int, rope:bool, use_fusio
         if recompute_indices is not None:
             recompute_indices = [int(x) for x in recompute_indices]
             data["fusionrag_params"]["recompute_idx"] = recompute_indices
+        if recompute_tokens_list is not None:
+            data["fusionrag_params"]["recompute_tokens_list"] = recompute_tokens_list
         if preprocess_cache_key_list is not None:
             data["fusionrag_params"]["preprocess_cache_key_list"] = preprocess_cache_key_list
         if cache_is_preprocess_list is not None:
@@ -389,7 +392,8 @@ def run_one_question_sglang_preprocess(
         MODEL=MODEL,
         endpoint_url=endpoint_url,
         preprocess_cache_key_list=preprocess_cache_key_list,
-        cache_is_preprocess_list=cache_is_preprocess_list
+        cache_is_preprocess_list=cache_is_preprocess_list,
+        recompute_tokens_list=recompute_tokens_list
     )
 
 def run_one_question_sglang(
@@ -486,7 +490,8 @@ def run_one_question_sglang(
         recompute_tokens=recompute_tokens,
         MODEL=MODEL,
         endpoint_url=endpoint_url,
-        recompute_indices=recompute_indices
+        recompute_indices=recompute_indices,
+        recompute_tokens_list=recompute_tokens_list
     )
 
 def run_one_question_origin_sglang(

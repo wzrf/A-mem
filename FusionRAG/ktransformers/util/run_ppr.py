@@ -501,78 +501,178 @@ def _decode_with_tokenizer(args):
     tokens, tokenizer = args
     return tokenizer.decode(tokens, skip_special_tokens=False)
 
-
-def highlight_tokens_compare(k_need_index, passages, tokenizer, query="", passages_str=None) -> Tuple[List[str], List[List[str]]]:
+def highlight_tokens_compare(
+        k_need_index: List[int],
+        passages: Union[List[torch.Tensor], torch.Tensor],
+        tokenizer,
+        query: str = "",
+        passages_str: List[str] = None
+) -> Tuple[List[str], List[List[str]]]:
     """
-    将passages中的token解码为字符串，并高亮显示k_need_index位置的token
+    根据 passages_str 挨个 encode，计算出每个 Passage 在全局 Token 中的范围，
+    然后使用 k_need_index 提取每个 Passage 内部的重算字符串列表 (recompute_str_list)。
 
-    参数:
-        k_need_index: List[int] - 需要高亮的token索引位置
-        passages: List[torch.Tensor] - token张量列表
-        tokenizer: transformers tokenizer - 用于解码token
+    返回:
+        combine_tokens: List[str] - 所有 passage 片段展平后的列表
+        all_recompute_tokens: List[List[str]] - 与 passages_str 1对1对应的重算 str list
+                                                 [0]不重算, [1]重算, [2]不重算...
     """
-    # 将passages拼接成一个完整的token序列
-    # print(f"[highlight_tokens_compare] k_need_index={k_need_index}")
-    if type(passages) == list:
-        full_passage = torch.cat(passages).squeeze()  # [seq_len] 或 [batch, seq_len] -> [seq_len]
+    if passages_str is None:
+        raise ValueError("passages_str 不能为 None，每个 passage 需要通过 passages_str 来对齐！")
+
+    k_need_set = set(k_need_index)
+    all_recompute_tokens: List[List[str]] = []
+    combine_tokens: List[str] = []
+
+    global_token_offset = 0  # 记录当前 passage 在全局 full_passage 中的起始 token 偏移
+
+    # 1. 遍历每一个文档字符串，单独 encode 找到各自的 token 边界
+    for p_idx, p_str in enumerate(passages_str):
+        # 对当前 passage 进行 encode，得到对应的 token ids
+        p_tokens = tokenizer.encode(p_str, add_special_tokens=False)
+        print(f"passage {p_idx}: {len(p_tokens)}")
+        p_len = len(p_tokens)
+
+        if p_len == 0:
+            all_recompute_tokens.append([])
+            continue
+
+        combined_passages: List[List[int]] = []
+        last_chosen = False  # 契约：首个片段必须是“不需要重算”的 (偶数索引)
+        last_tokens: List[int] = []
+
+        # 2. 对当前 Passage 内的 Token 逐个匹配全局 k_need_index
+        for local_i, token_id in enumerate(p_tokens):
+            global_i = global_token_offset + local_i
+            is_needed = global_i in k_need_set
+
+            if is_needed == last_chosen:
+                last_tokens.append(int(token_id))
+            else:
+                last_chosen = is_needed
+                # 当 local_i=0 且第一个 Token 就需要重算(is_needed=True)时，
+                # 此处 last_tokens 为 []，append([]) 会在索引 0 放空 Token，
+                # 解码为 ""，顺延高亮块到索引 1 (奇数位)，完美满足契约！
+                combined_passages.append(last_tokens)
+                last_tokens = [int(token_id)]
+
+        if last_tokens:
+            combined_passages.append(last_tokens)
+
+        # 3. 在当前 Passage 内部进行增量前缀 Decode，生成该 Passage 的 recompute_str_list
+        p_recompute_list: List[str] = []
+        for i in range(len(combined_passages)):
+            previous_text_combine = sum(combined_passages[:i], [])
+            cur_text_combine = sum(combined_passages[:i + 1], [])
+
+            previous_text = tokenizer.decode(previous_text_combine, skip_special_tokens=False)
+            cur_text = tokenizer.decode(cur_text_combine, skip_special_tokens=False)
+
+            p_recompute_list.append(cur_text[len(previous_text):])
+
+        all_recompute_tokens.append(p_recompute_list)
+        combine_tokens.extend(p_recompute_list)
+
+        # 累加 Token 偏移量
+        global_token_offset += p_len
+
+    # 4. 终端彩色高亮打印（保持调试可视化）
+    if isinstance(passages, list):
+        full_passage = torch.cat(passages).squeeze()
     else:
         full_passage = passages
 
-    combine_tokens = []
-    combined_passages = []
-    last_chosen = False
-    last_tokens = []
-    for i, token in enumerate(full_passage):
-        if (i in k_need_index) == last_chosen:
-            last_tokens.append(int(token))
-        else:
-            ## mengyao_debug: 状态转换了，从不需要重计算-》需要重计算 / 需要重计算-〉不需要
-            ## 这个情况下第一个字符串肯定是不需要重计算的，sglang里面对齐的也是这个逻辑。
-            last_chosen = i in k_need_index
-            combined_passages.append(last_tokens)
-            last_tokens = [int(token)]
-    ##mengyao_debug: append the last one
-    combined_passages.append(last_tokens)
+    full_passage_tokens = full_passage.tolist() if isinstance(full_passage, torch.Tensor) else full_passage
+    tokens = [tokenizer.decode(t, skip_special_tokens=False) for t in full_passage_tokens]
 
-    for i, sub_tokens in enumerate(combined_passages):
-        previous_text_list = combined_passages[:i]
-        cur_text_list = combined_passages[:i+1]
-        previous_text_list_combine = sum(previous_text_list, [])
-        cur_text_list_combine = sum(cur_text_list, [])
-        previous_text = tokenizer.decode(previous_text_list_combine, skip_special_tokens=False)
-        cur_text = tokenizer.decode(cur_text_list_combine, skip_special_tokens=False)
-        combine_tokens.append(cur_text[len(previous_text):])
-
-    all_recompute_tokens = []
-    if passages_str is not None:
-        all_recompute_tokens = find_recompute_tokens_within_passages(
-            combine_tokens=combine_tokens,
-            passages=passages_str
-        )
-
-
-    print("-" * 50)
-    # 获取所有token的字符串表示
-    tokens = []
-    for token_id in full_passage:
-        token_str = tokenizer.decode(token_id, skip_special_tokens=False)
-        # 注意：这里不要strip()，保留原始解码结果
-        tokens.append(token_str)
-
-    # 构建带高亮的文本（用空格连接）
     highlighted_tokens = []
-    for i, token in enumerate(tokens):
-        if i in k_need_index:
-            highlighted_tokens.append(f"\033[1;31m{token}\033[0m")  # 红色高亮
+    for i, token_str in enumerate(tokens):
+        if i in k_need_set:
+            highlighted_tokens.append(f"\033[1;31m{token_str}\033[0m")
         else:
-            highlighted_tokens.append(token)
+            highlighted_tokens.append(token_str)
 
     highlighted_with_spaces = "".join(highlighted_tokens)
 
     if len(k_need_index) > 0:
         print(f"query={query}\n")
         print(f"highlighted_with_spaces={highlighted_with_spaces}")
+
     return combine_tokens, all_recompute_tokens
+
+# def highlight_tokens_compare(k_need_index, passages, tokenizer, query="", passages_str=None) -> Tuple[List[str], List[List[str]]]:
+#     """
+#     将passages中的token解码为字符串，并高亮显示k_need_index位置的token
+#
+#     参数:
+#         k_need_index: List[int] - 需要高亮的token索引位置
+#         passages: List[torch.Tensor] - token张量列表
+#         tokenizer: transformers tokenizer - 用于解码token
+#     """
+#     # 将passages拼接成一个完整的token序列
+#     # print(f"[highlight_tokens_compare] k_need_index={k_need_index}")
+#     if type(passages) == list:
+#         full_passage = torch.cat(passages).squeeze()  # [seq_len] 或 [batch, seq_len] -> [seq_len]
+#     else:
+#         full_passage = passages
+#
+#     combine_tokens = []
+#     combined_passages = []
+#     last_chosen = False
+#     last_tokens = []
+#     for i, token in enumerate(full_passage):
+#         if (i in k_need_index) == last_chosen:
+#             last_tokens.append(int(token))
+#         else:
+#             ## mengyao_debug: 状态转换了，从不需要重计算-》需要重计算 / 需要重计算-〉不需要
+#             ## 这个情况下第一个字符串肯定是不需要重计算的，sglang里面对齐的也是这个逻辑。
+#             last_chosen = i in k_need_index
+#             combined_passages.append(last_tokens)
+#             last_tokens = [int(token)]
+#     ##mengyao_debug: append the last one
+#     combined_passages.append(last_tokens)
+#
+#     print(f"combined_passages[0]= {combined_passages[0]}")
+#     print(f"combined_passages[1]= {combined_passages[1]}")
+#     for i, sub_tokens in enumerate(combined_passages):
+#         previous_text_list = combined_passages[:i]
+#         cur_text_list = combined_passages[:i+1]
+#         previous_text_list_combine = sum(previous_text_list, [])
+#         cur_text_list_combine = sum(cur_text_list, [])
+#         previous_text = tokenizer.decode(previous_text_list_combine, skip_special_tokens=False)
+#         cur_text = tokenizer.decode(cur_text_list_combine, skip_special_tokens=False)
+#         combine_tokens.append(cur_text[len(previous_text):])
+#
+#     all_recompute_tokens = []
+#     if passages_str is not None:
+#         all_recompute_tokens = find_recompute_tokens_within_passages(
+#             combine_tokens=combine_tokens,
+#             passages=passages_str
+#         )
+#
+#
+#     print("-" * 50)
+#     # 获取所有token的字符串表示
+#     tokens = []
+#     for token_id in full_passage:
+#         token_str = tokenizer.decode(token_id, skip_special_tokens=False)
+#         # 注意：这里不要strip()，保留原始解码结果
+#         tokens.append(token_str)
+#
+#     # 构建带高亮的文本（用空格连接）
+#     highlighted_tokens = []
+#     for i, token in enumerate(tokens):
+#         if i in k_need_index:
+#             highlighted_tokens.append(f"\033[1;31m{token}\033[0m")  # 红色高亮
+#         else:
+#             highlighted_tokens.append(token)
+#
+#     highlighted_with_spaces = "".join(highlighted_tokens)
+#
+#     if len(k_need_index) > 0:
+#         print(f"query={query}\n")
+#         print(f"highlighted_with_spaces={highlighted_with_spaces}")
+#     return combine_tokens, all_recompute_tokens
 
 
 

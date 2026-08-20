@@ -11,20 +11,29 @@ def analyze_tokens(file_path):
 
     total_prompt_tokens = 0
     total_completion_tokens = 0
-    count = len(data)
+    count = 0
+    raw_context_len = []
 
     for item in data:
-        total_prompt_tokens += item.get('prompt_tokens', 0)
-        total_completion_tokens += item.get('completion_tokens', 0)
+        raw_context_len.append(item.get("raw_context_len"))
+        if "prompt_tokens" in item and "completion_tokens" in item:
+            count += 1
+            total_prompt_tokens += item.get('prompt_tokens', 0)
+            total_completion_tokens += item.get('completion_tokens', 0)
 
     avg_prompt = total_prompt_tokens / count if count > 0 else 0
     avg_completion = total_completion_tokens / count if count > 0 else 0
 
     print(f"条目数量: {count}")
+    print(f"raw_context_len={sum(raw_context_len)/len(raw_context_len):.2f}")
     print(f"平均 prompt_tokens: {avg_prompt:.2f}")
     print(f"平均 completion_tokens: {avg_completion:.2f}")
     print(f"总 completion_tokens: {avg_prompt+avg_completion:.2f}")
 
 
 # 使用方法
-analyze_tokens('./token_consumption/0.json')
+print("memory")
+analyze_tokens('./results/result_fusion_rag_1.0_Qwen2.5-3B-Instruct_qwen2.5-7B_retrieve_5.json')
+
+print("rag")
+analyze_tokens('./results/result_simplerag_fusion_rag_1.0_Qwen2.5-3B-Instruct_qwen2.5-7B_retrieve_5.json')

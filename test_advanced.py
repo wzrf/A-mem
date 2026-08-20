@@ -30,7 +30,7 @@ except LookupError:
 
 # Initialize SentenceTransformer model (this will be reused)
 try:
-    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    sentence_model = SentenceTransformer('/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2')
 except Exception as e:
     print(f"Warning: Could not load SentenceTransformer model: {e}")
     sentence_model = None
@@ -38,7 +38,7 @@ except Exception as e:
 class advancedMemAgent:
     def __init__(self, model, backend, retrieve_k, temperature_c5, sglang_host="http://localhost", sglang_port=30000):
         self.memory_system = AgenticMemorySystem(
-            model_name='all-MiniLM-L6-v2',
+            model_name='/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2',
             llm_backend=backend,
             llm_model=model,
             sglang_host=sglang_host,
