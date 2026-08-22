@@ -63,7 +63,9 @@ def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_{sample.question_id}.pkl")
         retriever_cache_emb = os.path.join(memories_dir, f"retriever_cache_{sample.question_id}.npy")
 
+        ##mengyao_debug 检查历史build
         if os.path.exists(memory_cache_file):
+            print(f"[sample_idx={sample.question_id}] already built.")
             return
 
         token_consumption_file = f"./token_consumption/longmemeval_{sample.question_id}.json"
@@ -142,6 +144,7 @@ def evaluate_longmemeval(samples: List[LongMemQA], model: str, backend: str,
                 "prompt_tokens": p_tokens,
                 "completion_tokens": c_tokens
             }
+            print(res)
             result_queue.put((res, metrics, sample.question_type))
             qa_queue.task_done()
 
@@ -204,8 +207,8 @@ def main():
     args = parser.parse_args()
 
     samples = load_longmemeval_dataset(args.dataset)
-    devices = ["cuda:0"]
-    MAX_WORKERS = 64 ##mengyao_debug
+    devices = ["cuda:1" for i in range(32)] ##mengyao_debug 测试的并发
+    MAX_WORKERS = 64 ##mengyao_debug build的并发
     if os.environ.get('DEBUG') == "1":
         MAX_WORKERS = 1
 

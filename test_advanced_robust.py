@@ -236,6 +236,8 @@ Keywords:"""
         context = raw_context
 
         assert category in [1, 2, 3, 4, 5]
+        prompt_tokens = 0
+        completion_tokens = 0
 
         if category == 5:
             answer_tmp = list()
@@ -267,13 +269,13 @@ Question: {question} Short answer:"""
             temperature = 0.7
 
         try:
-            response = self.memory_system.llm_controller.llm.get_completion(
+            response, prompt_tokens, completion_tokens = self.memory_system.llm_controller.llm.get_completion_with_token(
                 user_prompt, temperature=temperature,
             )
         except Exception as e:
             logger.warning("answer_question failed: %s — returning empty", e)
             response = ""
-        return response, user_prompt, raw_context, raw_context_list, response["usage"]["prompt_tokens"], response["usage"]["completion_tokens"]
+        return response, user_prompt, raw_context, raw_context_list, prompt_tokens, completion_tokens
 
 
     def answer_question_fusionrag(self, question: str, category: int, answer: str, use_rag: bool, sample_idx: int) -> tuple:
@@ -919,7 +921,7 @@ def main():
             args.sglang_host, args.sglang_port, max_workers=MAX_WORKERS
         )
 
-    devices = ["cuda:1"]
+    devices = ["cuda:1" for i in range(64)]
     # devices = ["cuda:0"]
     evaluate_dataset(
         dataset_path, args.model, output_path, args.ratio,

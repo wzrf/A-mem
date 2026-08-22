@@ -152,7 +152,12 @@ def calculate_metrics(prediction: str, reference: str) -> Dict[str, float]:
     # Calculate all scores
     rouge_scores = calculate_rouge_scores(prediction, reference)
     bleu_scores = calculate_bleu_scores(prediction, reference)
-    bert_scores = calculate_bert_scores(prediction, reference)
+    # bert_scores = calculate_bert_scores(prediction, reference)
+    bert_scores = {
+            'bert_precision': 0.0,
+            'bert_recall': 0.0,
+            'bert_f1': 0.0
+        } ##mengyao_debug skip this.
     meteor = calculate_meteor_score(prediction, reference)
     sbert_similarity = calculate_sentence_similarity(prediction, reference)
     
