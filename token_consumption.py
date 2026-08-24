@@ -101,7 +101,7 @@ def calculate_bleu_scores(prediction: str, reference: str) -> dict[str, float]:
     return scores
 
 
-def extract_fields(item: dict) -> tuple[str, str, str, float | None]:
+def extract_fields(item: dict) -> tuple[str, str, str, float, int, int | None]:
     """动态解析样本中的类别、预测文本、参考文本与准确率判定"""
     # 提取 Category
     if "question_type" in item:
@@ -117,6 +117,8 @@ def extract_fields(item: dict) -> tuple[str, str, str, float | None]:
 
     # 提取 Reference / Golden Answer
     ref = item.get("golden_answer") or item.get("original_answer") or item.get("reference") or ""
+    prompt_tokens = item.get("prompt_tokens", 0)
+    completion_tokens = item.get("completion_tokens", 0)
 
     # 提取 Correct / Accuracy 判定
     correct_val = item.get("correct")
@@ -127,7 +129,7 @@ def extract_fields(item: dict) -> tuple[str, str, str, float | None]:
         else:
             judge_score = float(correct_val)
 
-    return category, str(pred), str(ref), judge_score
+    return category, str(pred), str(ref), judge_score, prompt_tokens, completion_tokens
 
 
 def evaluate_dataset(file_path: str) -> pd.DataFrame:
@@ -141,8 +143,14 @@ def evaluate_dataset(file_path: str) -> pd.DataFrame:
 
     metrics_by_category = defaultdict(list)
 
+    all_prompt_tokens = []
+    all_completion_tokens = []
     for item in data_list:
-        cat, pred, ref, judge_score = extract_fields(item)
+        cat, pred, ref, judge_score, prompt_tokens, completion_tokens = extract_fields(item)
+        if prompt_tokens != 0:
+            all_prompt_tokens.append(prompt_tokens)
+        if completion_tokens != 0:
+            all_completion_tokens.append(completion_tokens)
 
         # 实时按对齐的方法计算 F1 和 BLEU 1-4
         f1_val = compute_f1(pred, ref)
@@ -172,6 +180,14 @@ def evaluate_dataset(file_path: str) -> pd.DataFrame:
     # 汇总计算各 Group 均值
     summary_rows = []
     all_records = []
+
+    question_prompt_tokens_avg = sum(all_prompt_tokens) / len(all_prompt_tokens)
+    question_completion_tokens_avg = sum(all_completion_tokens) / len(all_completion_tokens)
+
+    print(
+        f"[QUESTION] Average Prompt Tokens    : {question_prompt_tokens_avg:.2f}\n"
+        f"[QUESTION] Average Completion Tokens: {question_completion_tokens_avg:.2f}"
+    )
 
     for cat_key, records in metrics_by_category.items():
         all_records.extend(records)

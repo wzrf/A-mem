@@ -196,6 +196,7 @@ class RobustAdvancedMemAgent:
         if self.token_consumption_file != "":
             with open(self.token_consumption_file, "w") as f:
                 json.dump(self.tokens_comsumption, f, indent=4)
+        return prompt_tokens, completion_tokens
 
 
     def retrieve_memory(self, content, k=10):
