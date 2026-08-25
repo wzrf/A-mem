@@ -25,8 +25,6 @@ def run_dir(path: str, name: str):
           f"average completion_tokens: {sum(all_completion_tokens)/len(all_completion_tokens)}")
 
 
-run_dir("./token_consumption", "locomo")
-run_dir("./token_consumption", "longmemeval")
 
 import argparse
 import json
@@ -221,10 +219,134 @@ def evaluate_dataset(file_path: str) -> pd.DataFrame:
     return result_df[final_cols]
 
 
+def analyze_halumem_robust(folder_path: str = "./results_halumem_robust") -> pd.DataFrame:
+    """分析 halumem_robust 结果文件夹中的 JSON 文件，按问题类型统计 token 消耗和准确率指标。"""
+    import json
+    from pathlib import Path
+    import pandas as pd
+    from collections import defaultdict
+
+    folder = Path(folder_path)
+    if not folder.exists():
+        raise FileNotFoundError(f"文件夹不存在: {folder_path}")
+
+    json_files = list(folder.glob("*.json"))
+    if not json_files:
+        raise ValueError(f"在文件夹中没有找到 JSON 文件: {folder_path}")
+
+    all_records = []
+    for file in json_files:
+        with open(file, "r", encoding="utf-8") as f:
+            data_list = json.load(f)
+        for item in data_list:
+            # 提取 token 字段
+            turn_build_memory_prompt_tokens = item.get("turn_build_memory_prompt_tokens", 0)
+            turn_build_memory_completion_tokens = item.get("turn_build_memory_completion_tokens", 0)
+            answer_prompt_tokens = item.get("answer_prompt_tokens", 0)
+            answer_completion_tokens = item.get("answer_completion_tokens", 0)
+            # 提取问题类型
+            question_type = item.get("question_type", "Uncategorized")
+            # 提取指标
+            metrics = item.get("metrics", {})
+            f1 = metrics.get("f1", 0.0)
+            exact_match = metrics.get("exact_match", 0.0)
+            rouge1_f = metrics.get("rouge1_f", 0.0)
+            rouge2_f = metrics.get("rouge2_f", 0.0)
+            rougeL_f = metrics.get("rougeL_f", 0.0)
+            bleu1 = metrics.get("bleu1", 0.0)
+            bleu2 = metrics.get("bleu2", 0.0)
+            bleu3 = metrics.get("bleu3", 0.0)
+            bleu4 = metrics.get("bleu4", 0.0)
+            sbert_similarity = metrics.get("sbert_similarity", 0.0)
+            meteor = metrics.get("meteor", 0.0)
+
+            record = {
+                "question_type": question_type,
+                "turn_build_memory_prompt_tokens": turn_build_memory_prompt_tokens,
+                "turn_build_memory_completion_tokens": turn_build_memory_completion_tokens,
+                "answer_prompt_tokens": answer_prompt_tokens,
+                "answer_completion_tokens": answer_completion_tokens,
+                "f1": f1,
+                "exact_match": exact_match,
+                "rouge1_f": rouge1_f,
+                "rouge2_f": rouge2_f,
+                "rougeL_f": rougeL_f,
+                "bleu1": bleu1,
+                "bleu2": bleu2,
+                "bleu3": bleu3,
+                "bleu4": bleu4,
+                "sbert_similarity": sbert_similarity,
+                "meteor": meteor,
+            }
+            all_records.append(record)
+
+    df = pd.DataFrame(all_records)
+    if df.empty:
+        print("没有找到有效数据。")
+        return pd.DataFrame()
+
+    # 按问题类型分组计算平均值
+    grouped = df.groupby("question_type").agg({
+        "turn_build_memory_prompt_tokens": "mean",
+        "turn_build_memory_completion_tokens": "mean",
+        "answer_prompt_tokens": "mean",
+        "answer_completion_tokens": "mean",
+        "f1": "mean",
+        "exact_match": "mean",
+        "rouge1_f": "mean",
+        "rouge2_f": "mean",
+        "rougeL_f": "mean",
+        "bleu1": "mean",
+        "bleu2": "mean",
+        "bleu3": "mean",
+        "bleu4": "mean",
+        "sbert_similarity": "mean",
+        "meteor": "mean",
+    }).round(4)
+    grouped["count"] = df.groupby("question_type").size()
+
+    # 重置索引，将 question_type 变为列
+    grouped = grouped.reset_index()
+    grouped = grouped.rename(columns={"question_type": "category"})
+
+    # 计算总体平均值
+    overall = df.mean(numeric_only=True).to_dict()
+    overall["category"] = "OVERALL (Total Avg)"
+    overall["count"] = len(df)
+    overall_df = pd.DataFrame([overall])
+    # 确保列顺序一致
+    overall_df = overall_df[grouped.columns]
+
+    # 合并
+    result_df = pd.concat([grouped, overall_df], ignore_index=True)
+
+    # 整理列顺序，将类别和计数放在前面
+    cols = ["category", "count"]
+    token_cols = ["turn_build_memory_prompt_tokens", "turn_build_memory_completion_tokens",
+                  "answer_prompt_tokens", "answer_completion_tokens"]
+    metric_cols = ["f1", "exact_match", "rouge1_f", "rouge2_f", "rougeL_f",
+                   "bleu1", "bleu2", "bleu3", "bleu4", "sbert_similarity", "meteor"]
+    # 只保留存在的列
+    existing_cols = []
+    for col in cols + token_cols + metric_cols:
+        if col in result_df.columns:
+            existing_cols.append(col)
+    # 添加其他列（如果有）
+    other_cols = [c for c in result_df.columns if c not in existing_cols]
+    final_cols = existing_cols + other_cols
+    result_df = result_df[final_cols]
+
+    return result_df
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="使用基准对齐的 F1/BLEU 逻辑计算评测统计")
     parser.add_argument("--file_path", type=str, help="评估 JSON 结果文件路径")
     parser.add_argument("--csv", type=str, default=None, help="保存统计结果 CSV 路径")
+    parser.add_argument("--halumem_robust", action="store_true", help="分析 results_halumem_robust 文件夹")
+    parser.add_argument("--folder", type=str, default="./results_halumem_robust", help="halumem_robust 文件夹路径（默认：./results_halumem_robust）")
+    parser.add_argument("--run_dir", action="store_true", help="运行旧版 run_dir 分析 token_consumption 文件夹")
 
     args = parser.parse_args()
 
@@ -234,20 +356,43 @@ def main():
     except LookupError:
         nltk.download("punkt", quiet=True)
 
-    summary_df = evaluate_dataset(args.file_path)
-
     pd.set_option("display.max_columns", None)
     pd.set_option("display.width", 1000)
 
-    print("\n" + "=" * 90)
-    print(f" 评测指标对齐统计表: {args.file_path}")
-    print("=" * 90)
-    print(summary_df.round(4).to_string(index=False))
-    print("=" * 90 + "\n")
+    if args.halumem_robust:
+        summary_df = analyze_halumem_robust(args.folder)
+        print("\n" + "=" *104)
+        print(f" HALUMEM Robust 统计表: {args.folder}")
+        print("=" *104)
+        print(summary_df.round(4).to_string(index=False))
+        print("=" *104 + "\n")
+        if args.csv:
+            summary_df.round(6).to_csv(args.csv, index=False)
+            print(f"结果已成功导出至: {args.csv}")
+        return
 
-    if args.csv:
-        summary_df.round(6).to_csv(args.csv, index=False)
-        print(f"结果已成功导出至: {args.csv}")
+    if args.file_path:
+        summary_df = evaluate_dataset(args.file_path)
+        print("\n" + "=" * 90)
+        print(f" 评测指标对齐统计表: {args.file_path}")
+        print("=" * 90)
+        print(summary_df.round(4).to_string(index=False))
+        print("=" * 90 + "\n")
+        if args.csv:
+            summary_df.round(6).to_csv(args.csv, index=False)
+            print(f"结果已成功导出至: {args.csv}")
+        return
+
+    if args.run_dir:
+        # 旧版 token_consumption 文件夹分析
+        run_dir("./token_consumption", "locomo")
+        run_dir("./token_consumption", "longmemeval")
+        return
+
+    # 默认行为：如果没有提供任何参数，则运行旧版分析（保持向后兼容）
+    print("未指定参数，运行默认 token_consumption 分析...")
+    run_dir("./token_consumption", "locomo")
+    run_dir("./token_consumption", "longmemeval")
 
 
 if __name__ == "__main__":
