@@ -71,6 +71,35 @@ class HaluMemRobustTester:
         self.sglang_host = sglang_host
         self.sglang_port = sglang_port
 
+    def _get_expected_question_ids(self, sample: HaluMemSample) -> set:
+        """获取样本中所有问题的预期 question_id 集合。"""
+        safe_sample_id = sample.sample_id.replace(" ", "_")
+        expected_ids = set()
+        for s_idx, session in enumerate(sample.sessions):
+            questions = session.get("questions", [])
+            for q_idx, _ in enumerate(questions):
+                question_id = f"{safe_sample_id}_s{s_idx}_q{q_idx}"
+                expected_ids.add(question_id)
+        return expected_ids
+
+    def _get_existing_question_ids(self, file_path: str) -> set:
+        """从结果文件中读取已有的 question_id 集合。"""
+        if not os.path.exists(file_path):
+            return set()
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                return set()
+            existing_ids = set()
+            for item in data:
+                if 'question_id' in item:
+                    existing_ids.add(item['question_id'])
+            return existing_ids
+        except Exception as e:
+            print(f"读取文件 {file_path} 失败: {e}")
+            return set()
+
     def run_single_sample(self, sample: HaluMemSample, sample_idx: int, save_dir: str = "./results_halumem_robust"):
         """
         处理单个 HaluMem 样本：
@@ -80,6 +109,20 @@ class HaluMemRobustTester:
         """
         safe_sample_id = sample.sample_id.replace(" ", "_")
         token_consumption_file = f"./token_consumption/halumem_{safe_sample_id}.json"
+
+        # 检查是否已经处理了所有问题
+        result_file = os.path.join(save_dir, f"{safe_sample_id}.json")
+        expected_ids = self._get_expected_question_ids(sample)
+        existing_ids = self._get_existing_question_ids(result_file)
+
+        if expected_ids.issubset(existing_ids):
+            print(f"[{sample_idx}] Sample {safe_sample_id} 已完全处理，跳过。")
+            # 读取现有结果并返回
+            with open(result_file, 'r', encoding='utf-8') as f:
+                sample_results = json.load(f)
+            avg_f1 = sum(r['metrics'].get('f1', 0) for r in sample_results) / len(sample_results) if sample_results else 0
+            print(f"[{sample_idx}] Sample ID: {safe_sample_id} | Total Queries: {len(sample_results)} | Avg F1: {avg_f1:.3f} (已存在)")
+            return sample_results
 
         # 为当前 Sample 初始化专属的 Memory Agent 实例
         agent = RobustAdvancedMemAgent(
@@ -99,7 +142,7 @@ class HaluMemRobustTester:
 
         # 遍历每个 Session
         for s_idx, session in enumerate(sample.sessions):
-            print(f"running sample {s_idx} session {s_idx}/{len(sample.sessions)}")
+            print(f"running sample {sample_idx} session {s_idx}/{len(sample.sessions)}")
             dialogue_turns = session.get("dialogue", session.get("messages", []))
             questions = session.get("questions", [])
 
@@ -211,8 +254,8 @@ def main():
     samples = load_halumem_dataset(args.dataset)
 
     max_workers = 16
-    # if os.environ.get('DEBUG') == "1":
-    #     max_workers = 1
+    if os.environ.get('DEBUG') == "1":
+        max_workers = 1
 
     # 工作线程函数
     def _worker(idx_sample):

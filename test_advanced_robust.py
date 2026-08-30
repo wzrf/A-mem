@@ -55,6 +55,7 @@ except Exception as e:
     sentence_model = None
 
 logger = logging.getLogger("amem_robust")
+all_memory_summarize_percentage = []
 
 import random
 from collections import defaultdict
@@ -486,6 +487,23 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
             eval_logger.info(f"{prefix} Successfully cached {len(memories_to_cache)} memories")
+
+        all_origin_content = " ".join([x.content for _, x in agent.memory_system.memories.items()])
+        all_context = " ".join([x.context+" ".join(x.keywords)+" ".join(x.tags) for _, x in agent.memory_system.memories.items()])
+        all_history = ""
+        for session_idx, turns in sample.conversation.sessions.items():
+            for turx_idx, turn in enumerate(turns.turns):
+                turn_datatime = turns.date_time
+                conversation_tmp = " Speaker " + turn.speaker + "says : " + turn.text
+                all_history += conversation_tmp
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("/mnt/qjhs-sh-lab-01/models/Qwen3-8B", trust_remote_code=True)
+        all_summary = tokenizer.encode(all_context, add_special_tokens=True)
+        all_origin_content = tokenizer.encode(all_origin_content, add_special_tokens=True)
+
+        all_memory_summarize_percentage.append(len(all_summary) / len(all_origin_content))
+        print(f"average memory summarize percentage={sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)}")
 
         eval_logger.info(f"{prefix} Finished processing")
 
