@@ -1,4 +1,5 @@
 # from ast import Str
+import threading
 from typing import List, Dict, Optional, Literal, Any, Union
 import json
 from datetime import datetime
@@ -19,8 +20,9 @@ import json as json_lib
 import time
 
 EMBEDDING_MODEL = SentenceTransformer(
-    '/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2'
+    '/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2', device='cpu'
 )
+embedder_lock = threading.Lock()
 
 def simple_tokenize(text):
     return word_tokenize(text)
@@ -575,13 +577,15 @@ class SimpleEmbeddingRetriever:
         if not self.corpus:
             self.corpus = documents
             # print("documents", documents, len(documents))
-            self.embeddings = self.model.encode(documents)
+            with embedder_lock:
+                self.embeddings = self.model.encode(documents)
             self.document_ids = {doc: idx for idx, doc in enumerate(documents)}
         else:
             # Append new documents
             start_idx = len(self.corpus)
             self.corpus.extend(documents)
-            new_embeddings = self.model.encode(documents)
+            with embedder_lock:
+                new_embeddings = self.model.encode(documents)
             if self.embeddings is None:
                 self.embeddings = new_embeddings
             else:
@@ -603,7 +607,8 @@ class SimpleEmbeddingRetriever:
             return []
         # print("corpus", len(self.corpus), self.corpus)
         # Encode query
-        query_embedding = self.model.encode([query])[0]
+        with embedder_lock:
+            query_embedding = self.model.encode([query])[0]
         
         # Calculate cosine similarities
         similarities = cosine_similarity([query_embedding], self.embeddings)[0]

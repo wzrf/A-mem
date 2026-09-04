@@ -48,14 +48,17 @@ import threading
 #     nltk.download('wordnet')
 
 # Initialize SentenceTransformer model (this will be reused)
-try:
-    sentence_model = SentenceTransformer('/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2')
-except Exception as e:
-    print(f"Warning: Could not load SentenceTransformer model: {e}")
-    sentence_model = None
+
+# try:
+#     sentence_model = SentenceTransformer('/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2')
+# except Exception as e:
+#     print(f"Warning: Could not load SentenceTransformer model: {e}")
+#     sentence_model = None
 
 logger = logging.getLogger("amem_robust")
 all_memory_summarize_percentage = []
+all_history_len = []
+all_answer_time = []
 
 import random
 from collections import defaultdict
@@ -361,7 +364,7 @@ Question: {question} Short answer:"""
                 self.sglang_url,
                 self.sglang_url_prefiller,
                 self.method_keyword,
-                recompute_indices=recompute_indices,
+                # recompute_indices=recompute_indices,
             )
             print(f"time_draft={time_end-time_start}, time_run={time.time()-time_end}")
         else:
@@ -400,7 +403,7 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
                  ratio: float = 1.0, backend: str = "sglang",
                  temperature_c5: float = 0.5, retrieve_k: int = 10,
                  sglang_host: str = "http://localhost", sglang_port: int = 30000,
-                 max_workers: int = 1):
+                 max_workers: int = 1, token_consumption_dir="./token_consumption"):
     """Evaluate the robust agent on the LoComo dataset using multi-threading."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{timestamp}.log"
@@ -433,7 +436,7 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
         """单样本处理函数（运行在独立线程中）"""
         prefix = f"[Sample {sample_idx + 1}/{len(samples)}]"
 
-        token_consumption_file = f"./token_consumption/locomo_{sample_idx}.json"
+        token_consumption_file = f"{token_consumption_dir}/locomo_{sample_idx}.json"
 
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5,
@@ -441,7 +444,7 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
             model_sglang="Qwen3-8B",
             method_keyword="",
             preprocess=False,
-            use_weighted_diff_attention=True,
+            use_weighted_diff_attention=False,
             sglang_url=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
             sglang_url_prefiller=f"http://{sapphire3_ip}:{sapphire3_prefiller_port}/v1/completions",
             fusion_rag_model=fusion_rag_model,
@@ -501,9 +504,10 @@ def build_memory(dataset_path: str, model: str, output_path: Optional[str] = Non
         tokenizer = AutoTokenizer.from_pretrained("/mnt/qjhs-sh-lab-01/models/Qwen3-8B", trust_remote_code=True)
         all_summary = tokenizer.encode(all_context, add_special_tokens=True)
         all_origin_content = tokenizer.encode(all_origin_content, add_special_tokens=True)
+        all_history_len.append(len(all_origin_content))
 
         all_memory_summarize_percentage.append(len(all_summary) / len(all_origin_content))
-        print(f"average memory summarize percentage={sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)}")
+        print(f"average memory summarize percentage={sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)}, all_history_len={sum(all_history_len)}")
 
         eval_logger.info(f"{prefix} Finished processing")
 
@@ -568,6 +572,10 @@ def evaluate_dataset(
         samples = samples[:num_samples]
         eval_logger.info(f"Using {num_samples} samples ({ratio*100:.1f}% of dataset)")
 
+    if os.environ.get('DEBUG', '') == "true":
+        samples = samples[:1]
+        samples[0].qa = samples[0].qa[:5]
+
     results = []
     all_metrics = []
     all_categories = []
@@ -577,25 +585,29 @@ def evaluate_dataset(
     # --- 检查并读取已有的结果文件 ---
     fusion_rag_tag = "fusion_rag" if use_fusion_rag else ""
     rag_tag = "_simplerag" if use_rag else ""
-    os.makedirs("./results", exist_ok=True)
-    results_file = f"./results/result{rag_tag}_{fusion_rag_tag}_{recomputation_rate}_{draft_model_name}_{sglang_model}_retrieve_{retrieve_k}.json"
+    os.makedirs(output_path, exist_ok=True)
+    if fusion_rag_tag:
+        results_file = f"{output_path}/result{rag_tag}_{fusion_rag_tag}_{recomputation_rate}_{draft_model_name}_{sglang_model}_retrieve_{retrieve_k}.json"
+    else:
+        results_file = f"{output_path}/retrieve_{retrieve_k}.json"
     print(f"results_file={results_file}")
     processed_keys = set()
 
-    if os.path.exists(results_file):
-        try:
-            with open(results_file, "r") as f:
-                results = json.load(f)
-            for r in results:
-                processed_keys.add((r["sample_id"], r["question"]))
-                all_metrics.append(r["metrics"])
-                all_categories.append(r["category"])
-                total_questions += 1
-                category_counts[r["category"]] += 1
-            eval_logger.info(f"Loaded {len(results)} existing results from {results_file}, skipping them.")
-        except Exception as e:
-            eval_logger.warning(f"Failed to load existing results from {results_file}: {e}")
-            results = []
+    if os.environ.get('DEBUG', '') != "true":
+        if os.path.exists(results_file):
+            try:
+                with open(results_file, "r") as f:
+                    results = json.load(f)
+                for r in results:
+                    processed_keys.add((r["sample_id"], r["question"]))
+                    all_metrics.append(r["metrics"])
+                    all_categories.append(r["category"])
+                    total_questions += 1
+                    category_counts[r["category"]] += 1
+                eval_logger.info(f"Loaded {len(results)} existing results from {results_file}, skipping them.")
+            except Exception as e:
+                eval_logger.warning(f"Failed to load existing results from {results_file}: {e}")
+                results = []
 
     error_num = 0
     memories_dir = os.path.join(
@@ -647,6 +659,7 @@ def evaluate_dataset(
                 current_sample_idx = sample_idx
 
             # 评估单个 QA
+            time_start = time.time()
             if use_fusion_rag:
                 prediction, user_prompt, raw_context, raw_context_list, prompt_tokens, completion_tokens = agent.answer_question_fusionrag(
                     qa.question, qa.category, qa.final_answer, use_rag, sample_idx
@@ -655,6 +668,9 @@ def evaluate_dataset(
                 prediction, user_prompt, raw_context, raw_context_list, prompt_tokens, completion_tokens = agent.answer_question(
                     qa.question, qa.category, qa.final_answer
                 )
+            time_answer = time.time() - time_start
+            all_answer_time.append(time_answer)
+            print(f"average answer time = {sum(all_answer_time) / len(all_answer_time)}")
             print(f"prediction={prediction}")
 
             prediction = parse_plain_text_answer(prediction)
@@ -695,15 +711,17 @@ def evaluate_dataset(
         if SYSTEM_ == "linux" and use_fusion_rag:
             from FusionRAG.run_question import FusionRAGModel
             fusion_rag_model = FusionRAGModel(
-                device=dev,
-                draft_model_device=dev,
+                model_path='',
+                use_multi_gpu=True,
+                model_type="qwen3",
+                model_name="Qwen3-32B",
+                draft_model_type="qwen",
+                draft_model_name="qwen2.5-3b",
+                preprocess_model_path="/data2/qy_tmp/xumengyao/bge-m3",
                 draft_model_path=draft_model_path,
-                draft_model_type=draft_model_type,
-                draft_model_name=draft_model_name,
-                model_path="",
-                cache_path="",
-                preprocess=False,
+                draft_model_url="http://127.0.0.1:30005/v1/completions",
                 apikey="xxx",
+                use_local_draft_model=False,
             )
         else:
             fusion_rag_model = None
@@ -713,11 +731,11 @@ def evaluate_dataset(
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5,
             sglang_host, sglang_port,
-            model_sglang="Qwen3-8B",
+            model_sglang="Kimi-K2.6",
             recomputation_rate=recomputation_rate,
             method_keyword="",
             preprocess=False,
-            use_weighted_diff_attention=True,
+            use_weighted_diff_attention=False,
             sglang_url=sglang_url,
             sglang_url_prefiller=sglang_url_prefiller,
             fusion_rag_model=fusion_rag_model,
@@ -750,7 +768,7 @@ def evaluate_dataset(
                 model_sglang="Qwen3-8B",
                 recomputation_rate=recomputation_rate,
                 method_keyword="", preprocess=False,
-                use_weighted_diff_attention=True,
+                use_weighted_diff_attention=False,
                 sglang_url=sglang_url,
                 sglang_url_prefiller=sglang_url_prefiller,
                 fusion_rag_model=None, use_fusion_rag=False,
@@ -791,11 +809,8 @@ def evaluate_dataset(
         for qa in unprocessed_qas:
             qa_queue.put((sample_idx, qa))
 
-        # 4. 等待当前 Sample 的所有 QA 被所有 worker 消耗完毕
-        qa_queue.join()
-
         # 5. 主线程收集并写入当前 Sample 的所有评估结果
-        while not result_queue.empty():
+        for _ in range(len(unprocessed_qas)):
             result, metrics, category, log_payload = result_queue.get()
             total_questions += 1
             category_counts[category] += 1
@@ -815,6 +830,9 @@ def evaluate_dataset(
 
             if total_questions % 10 == 0:
                 eval_logger.info(f"Processed {total_questions} questions")
+
+        # 4. 等待当前 Sample 的所有 QA 被所有 worker 消耗完毕
+        qa_queue.join()
 
     # 停止所有 Worker 线程
     for _ in devices:
@@ -901,12 +919,18 @@ def main():
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
+    print(f"output_path={output_path}")
 
     args.use_fusion_rag = args.use_fusion_rag.lower() == "true"
     args.use_rag = args.use_rag.lower() == "true"
     print(f"use_fusion_rag= {args.use_fusion_rag}")
 
-    sapphire3_ip = "192.168.200.15"
+    token_consumption_dir = "./token_consumption"
+    if args.model.lower() != "qwen3-8b":
+        token_consumption_dir += f"_{args.model}"
+    os.makedirs(token_consumption_dir, exist_ok=True)
+
+    sapphire3_ip = "127.0.0.1"
     sapphire3_port_qwen25_7b = 30003
 
     if "qwen2.5-7B".lower() in args.sglang_model.lower():
@@ -916,11 +940,11 @@ def main():
         exit(0)
 
     if "qwen2.5-3b".lower() in args.draft_model.lower():
-        draft_model_path = '/mnt/data/models/Qwen2.5-3B-Instruct'
+        draft_model_path = '/mnt/qjhs-sh-lab-01/models/Qwen2.5-3B-Instruct'
         draft_model_type = "qwen"
         draft_model_name = "Qwen2.5-3B-Instruct"
     elif "qwen2.5-1.5b".lower() in args.draft_model.lower():
-        draft_model_path = '/mnt/data/models/Qwen2.5-1.5B-Instruct'
+        draft_model_path = '/mnt/qjhs-sh-lab-01/models/Qwen2.5-1.5B-Instruct'
         draft_model_type = "qwen"
         draft_model_name = "Qwen2.5-1.5B-Instruct"
     else:
@@ -929,19 +953,20 @@ def main():
 
     ##mengyao_debug max_workers
     MAX_WORKERS = 10
-    if os.environ.get('DEBUG') == "1":
+    devices = ["cuda:1" for i in range(64)]
+    if os.environ.get('DEBUG', '') == "true":
         MAX_WORKERS = 1
+        devices = ["cuda:1"]
 
     ## 是否只是build
     if not args.skip_build:
         build_memory(
             dataset_path, args.model, output_path, args.ratio,
             args.backend, args.temperature_c5, args.retrieve_k,
-            args.sglang_host, args.sglang_port, max_workers=MAX_WORKERS
+            args.sglang_host, args.sglang_port, max_workers=MAX_WORKERS,
+            token_consumption_dir=token_consumption_dir
         )
 
-    devices = ["cuda:1" for i in range(64)]
-    # devices = ["cuda:0"]
     evaluate_dataset(
         dataset_path, args.model, output_path, args.ratio,
         args.backend, args.temperature_c5, args.retrieve_k,

@@ -31,7 +31,7 @@ nltk.data.find('corpora/wordnet')
 
 # Initialize SentenceTransformer model (this will be reused)
 try:
-    sentence_model = SentenceTransformer('/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2')
+    sentence_model = SentenceTransformer('/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2', device='cpu')
 except Exception as e:
     print(f"Warning: Could not load SentenceTransformer model: {e}")
     sentence_model = None

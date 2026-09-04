@@ -51,19 +51,19 @@ def replace_keywords(draftmodel: str, runmodel: str, recompute_tokens: list[str]
 
 def get_model_and_prompt(model: str):
     print(f"model=\n{model}")
-    if model.lower() == "DeepSeek-V3.2".lower():
+    if "DeepSeek-V3".lower() in model.lower():
         return ("DeepSeek-V3.2",
                 PROMPTS["DeepSeek-V3.2"]["DEFAULT_SYSTEM_PROMPT"],
                 PROMPTS["DeepSeek-V3.2"]["USER_PROMPT"])
-    elif model.lower() == "Qwen2.5-7B-Instruct".lower():
+    elif "Qwen2.5".lower() in model.lower() :
         return ("Qwen2.5-7B-Instruct",
                 PROMPTS["Qwen2.5-7B-Instruct"]["DEFAULT_SYSTEM_PROMPT"],
                 PROMPTS["Qwen2.5-7B-Instruct"]["USER_PROMPT"])
-    elif model.lower() == "Kimi-K2.5".lower():
+    elif "Kimi-".lower() in model.lower():
         return ("Kimi-K2.5",
                 PROMPTS["Kimi-K2.5"]["DEFAULT_SYSTEM_PROMPT"],
                 PROMPTS["Kimi-K2.5"]["USER_PROMPT"])
-    elif model.lower() == "Qwen3-8B".lower():
+    elif "Qwen3".lower() in model.lower():
         return ("Qwen3-8B",
                 PROMPTS["Qwen3-8B"]["DEFAULT_SYSTEM_PROMPT"],
                 PROMPTS["Qwen3-8B"]["USER_PROMPT"])

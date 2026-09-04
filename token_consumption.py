@@ -391,8 +391,9 @@ def main():
 
     # 默认行为：如果没有提供任何参数，则运行旧版分析（保持向后兼容）
     print("未指定参数，运行默认 token_consumption 分析...")
-    run_dir("./token_consumption", "locomo")
-    run_dir("./token_consumption", "longmemeval")
+    run_dir("./token_consumption_Kimi-K2.6", "locomo")
+    run_dir("./token_consumption_qwen3-8b", "locomo")
+    run_dir("./token_consumption_qwen3-8b", "longmemeval")
 
 
 if __name__ == "__main__":

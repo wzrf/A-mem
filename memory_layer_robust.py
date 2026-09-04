@@ -112,7 +112,7 @@ class RobustOpenAIController(RobustBaseLLMController):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     @retry_llm_call(max_retries=2)
-    def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
+    def get_completion(self, prompt: str, temperature: float = 0.0) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -122,8 +122,11 @@ class RobustOpenAIController(RobustBaseLLMController):
             temperature=temperature,
             max_tokens=1000,
             extra_body={
-                "enable_thinking": False
-            },
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                    "thinking": False
+                }
+            }
         )
         return response.choices[0].message.content
 
@@ -139,9 +142,10 @@ class RobustOpenAIController(RobustBaseLLMController):
             max_tokens=1000,
             extra_body={
                 "chat_template_kwargs": {
-                    "enable_thinking": False
+                    "enable_thinking": False,
+                    "thinking": False
                 }
-            },
+            }
         )
         return response.choices[0].message.content, response.usage.prompt_tokens, response.usage.completion_tokens
 

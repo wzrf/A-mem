@@ -116,11 +116,11 @@ def load_or_build_index(docs_path: str, encoder: OnlineEncoder, keyword: str):
     index = None
     id2text = {}
     if os.path.exists(index_file) and os.path.exists(id2text_file):
-        print("加载缓存的 FAISS 索引和 id2text...")
+        # print("加载缓存的 FAISS 索引和 id2text...")
         index = faiss.read_index(index_file)          # 读取 IndexIDMap 包装的索引
         with open(id2text_file, 'r', encoding='utf-8') as f:
             id2text = {int(k): v for k, v in json.load(f).items()}
-        print(f"已加载 {len(id2text)} 个文档的向量。")
+        # print(f"已加载 {len(id2text)} 个文档的向量。")
     else:
         print("未找到缓存，将构建新索引。")
 
@@ -128,7 +128,7 @@ def load_or_build_index(docs_path: str, encoder: OnlineEncoder, keyword: str):
     existing_ids = set(id2text.keys())
     new_docs = [(doc_id, text) for doc_id, text in all_docs.items() if doc_id not in existing_ids]
     if not new_docs:
-        print("没有新文档，直接使用现有索引。")
+        # print("没有新文档，直接使用现有索引。")
         return index, id2text
 
     print(f"发现 {len(new_docs)} 个新文档，开始编码...")

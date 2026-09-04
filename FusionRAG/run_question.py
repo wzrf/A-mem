@@ -129,7 +129,7 @@ class FusionRAGModel:
         self.api_key = apikey
         self.encoder = OnlineEncoder(llm_api_key=apikey)
         self.file_input = file_input
-        if cache_path != "":
+        if cache_path != "" and use_local_draft_model:
             os.makedirs(self.save_path, exist_ok=True)
             os.makedirs(self.preprocess_save_path, exist_ok=True)
             os.makedirs(self.preprocess_empty_prefix_save_path, exist_ok=True)
@@ -208,7 +208,7 @@ class FusionRAGModel:
                 passage_len=32768
             )
 
-        if draft_model_path != "":
+        if draft_model_path != "" and use_local_draft_model:
             self.draft_past_key_values = StaticCache(
                 config=self.draft_model.config,
                 max_batch_size=1,
