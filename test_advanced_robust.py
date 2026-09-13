@@ -615,6 +615,7 @@ def evaluate_dataset(
         "cached_memories_robust_{}_{}".format(backend, model),
     )
     os.makedirs(memories_dir, exist_ok=True)
+    print(f"memories_dir={memories_dir}")
     allow_categories = [1, 2, 3, 4]
 
     SYSTEM_ = platform.system().lower()
@@ -919,7 +920,6 @@ def main():
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
-    print(f"output_path={output_path}")
 
     args.use_fusion_rag = args.use_fusion_rag.lower() == "true"
     args.use_rag = args.use_rag.lower() == "true"
@@ -929,6 +929,10 @@ def main():
     if args.model.lower() != "qwen3-8b":
         token_consumption_dir += f"_{args.model}"
     os.makedirs(token_consumption_dir, exist_ok=True)
+    os.makedirs(output_path, exist_ok=True)
+
+    print(f"token_consumption_dir = {token_consumption_dir}")
+    print(f"output_path={output_path}")
 
     sapphire3_ip = "127.0.0.1"
     sapphire3_port_qwen25_7b = 30003

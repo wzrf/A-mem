@@ -57,6 +57,10 @@ def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
                         sglang_port: int, max_workers: int = 4):
     memories_dir = os.path.join(os.path.dirname(__file__), f"cached_memories_longmem_{backend}_{model}")
     os.makedirs(memories_dir, exist_ok=True)
+    TOKEN_CONSUMPTION_DIR = f"./token_consumption_{model}"
+    os.makedirs(TOKEN_CONSUMPTION_DIR, exist_ok=True)
+    print(f"TOKEN_CONSUMPTION_DIR={TOKEN_CONSUMPTION_DIR}")
+    print(f"memories_dir={memories_dir}")
 
     def process_sample(sample_idx: int, sample: LongMemQA):
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_{sample.question_id}.pkl")
@@ -68,7 +72,7 @@ def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
             print(f"[sample_idx={sample.question_id}] already built.")
             return
 
-        token_consumption_file = f"./token_consumption/longmemeval_{sample.question_id}.json"
+        token_consumption_file = f"{TOKEN_CONSUMPTION_DIR}/longmemeval_{sample.question_id}.json"
 
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port,
@@ -76,13 +80,14 @@ def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
         )
 
         # 遍历会话与时间戳入库
+        # print(f"[sample_idx={sample.question_id}] building memory. sessions={len(sample.haystack_sessions)}")
         for s_idx, session in enumerate(sample.haystack_sessions):
             session_date = sample.haystack_dates[s_idx] if s_idx < len(sample.haystack_dates) else None
             for turn_idx, turn in enumerate(session):
                 speaker = turn.get("role", "user")
                 text = turn.get("content", "")
                 agent.add_memory(f"Speaker {speaker} says : {text}", time=session_date)
-                print(f"[sample_idx={sample_idx}] added turn {turn_idx}/{len(session)}")
+                # print(f"[sample_idx={sample_idx}] added turn {turn_idx}/{len(session)}")
             print(f"[sample_idx={sample_idx}] added session {s_idx}/{len(sample.haystack_sessions)}")
 
         with open(memory_cache_file, 'wb') as f:
