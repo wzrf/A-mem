@@ -9,6 +9,7 @@ from tqdm import tqdm
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
+
 os.environ["OMP_NUM_THREADS"] = "4"
 
 # 复用 test_advanced_robust 中的核心模块
@@ -19,6 +20,7 @@ from test_advanced_robust import (
     calculate_metrics,
     aggregate_metrics
 )
+
 
 # ============================================================================
 # LongMemEval 数据加载器
@@ -33,10 +35,11 @@ class LongMemQA:
     haystack_sessions: List[List[Dict[str, str]]]
     haystack_dates: List[str]
 
+
 def load_longmemeval_dataset(file_path: str) -> List[LongMemQA]:
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     samples = []
     for item in data:
         samples.append(LongMemQA(
@@ -49,51 +52,123 @@ def load_longmemeval_dataset(file_path: str) -> List[LongMemQA]:
         ))
     return samples
 
+
 # ============================================================================
 # 评测与建库逻辑
 # ============================================================================
 
-def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str, 
-                        retrieve_k: int, temperature_c5: float, sglang_host: str, 
-                        sglang_port: int, max_workers: int = 4):
+def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
+                         retrieve_k: int, temperature_c5: float, sglang_host: str,
+                         sglang_port: int, max_workers: int = 4):
     memories_dir = os.path.join(os.path.dirname(__file__), f"cached_memories_longmem_{backend}_{model}")
     os.makedirs(memories_dir, exist_ok=True)
     TOKEN_CONSUMPTION_DIR = f"./token_consumption_{model}"
     os.makedirs(TOKEN_CONSUMPTION_DIR, exist_ok=True)
+    progress_dir = os.path.join(os.path.dirname(__file__), f"progress_longmemeval_{model}")
+    os.makedirs(progress_dir, exist_ok=True)
     print(f"TOKEN_CONSUMPTION_DIR={TOKEN_CONSUMPTION_DIR}")
     print(f"memories_dir={memories_dir}")
+    print(f"progress_dir={progress_dir}")
 
     def process_sample(sample_idx: int, sample: LongMemQA):
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_{sample.question_id}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_{sample.question_id}.pkl")
         retriever_cache_emb = os.path.join(memories_dir, f"retriever_cache_{sample.question_id}.npy")
-
-        ##mengyao_debug 检查历史build
-        if os.path.exists(memory_cache_file):
-            print(f"[sample_idx={sample.question_id}] already built.")
-            return
-
+        progress_file = os.path.join(progress_dir, f"progress_{sample.question_id}.json")
         token_consumption_file = f"{TOKEN_CONSUMPTION_DIR}/longmemeval_{sample.question_id}.json"
 
+        # 加载进度：记录已处理的session索引
+        start_session_idx = 0
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    progress_data = json.load(f)
+                start_session_idx = progress_data.get("last_session_idx", 0)
+                print(f"[sample_idx={sample.question_id}] resuming from session {start_session_idx}")
+            except Exception as e:
+                print(f"[sample_idx={sample.question_id}] error reading progress file: {e}, starting from 0")
+
+        # 如果start_session_idx == 0，可能需要加载已存在的缓存（如果存在）
+        # 如果start_session_idx > 0，则必须加载缓存
+        load_cache = start_session_idx > 0 or os.path.exists(memory_cache_file)
+
+        # 创建agent
         agent = RobustAdvancedMemAgent(
             model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port,
             token_consumption_file=token_consumption_file
         )
 
-        # 遍历会话与时间戳入库
-        # print(f"[sample_idx={sample.question_id}] building memory. sessions={len(sample.haystack_sessions)}")
-        for s_idx, session in enumerate(sample.haystack_sessions):
+        # 加载token consumption（如果文件存在）
+        if os.path.exists(token_consumption_file):
+            try:
+                with open(token_consumption_file, 'r') as f:
+                    agent.tokens_comsumption = json.load(f)
+                print(
+                    f"[sample_idx={sample.question_id}] loaded {len(agent.tokens_comsumption)} token consumption records")
+            except Exception as e:
+                print(f"[sample_idx={sample.question_id}] error loading token consumption: {e}")
+
+        # 加载缓存（如果存在且需要）
+        if load_cache and os.path.exists(memory_cache_file):
+            try:
+                with open(memory_cache_file, 'rb') as f:
+                    agent.memory_system.memories = pickle.load(f)
+                print(
+                    f"[sample_idx={sample.question_id}] loaded {len(agent.memory_system.memories)} memories from cache")
+                # 加载retriever
+                if os.path.exists(retriever_cache_file):
+                    agent.memory_system.retriever = agent.memory_system.retriever.load(retriever_cache_file,
+                                                                                       retriever_cache_emb)
+                    print(f"[sample_idx={sample.question_id}] loaded retriever cache")
+                else:
+                    agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
+                        agent.memory_system.memories, 'all-MiniLM-L6-v2'
+                    )
+            except Exception as e:
+                print(f"[sample_idx={sample.question_id}] error loading cache: {e}, rebuilding from scratch")
+                start_session_idx = 0
+                agent.memory_system.memories = {}
+                # 重建retriever
+                agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
+                    agent.memory_system.memories, 'all-MiniLM-L6-v2'
+                )
+        elif start_session_idx > 0 and not os.path.exists(memory_cache_file):
+            print(
+                f"[sample_idx={sample.question_id}] WARNING: progress indicates session {start_session_idx} but cache missing, resetting progress")
+            start_session_idx = 0
+            # 进度文件可能已损坏，删除它
+            try:
+                os.remove(progress_file)
+            except:
+                pass
+        # 若不需要加载缓存（start_session_idx == 0 且无缓存文件），则 memory_system 已处于初始状态，无需操作
+
+        # 遍历会话与时间戳入库，从start_session_idx开始
+        total_sessions = len(sample.haystack_sessions)
+        for s_idx in range(start_session_idx, total_sessions):
+            session = sample.haystack_sessions[s_idx]
             session_date = sample.haystack_dates[s_idx] if s_idx < len(sample.haystack_dates) else None
+            time_start = time.time()
             for turn_idx, turn in enumerate(session):
                 speaker = turn.get("role", "user")
                 text = turn.get("content", "")
                 agent.add_memory(f"Speaker {speaker} says : {text}", time=session_date)
                 # print(f"[sample_idx={sample_idx}] added turn {turn_idx}/{len(session)}")
-            print(f"[sample_idx={sample_idx}] added session {s_idx}/{len(sample.haystack_sessions)}")
+            print(
+                f"[sample_idx={sample_idx}] added session {s_idx}/{total_sessions}, takes {time.time() - time_start} seconds.")
 
-        with open(memory_cache_file, 'wb') as f:
-            pickle.dump(agent.memory_system.memories, f)
-        agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_emb)
+            # 每个session处理完后，保存缓存文件和进度文件
+            with open(memory_cache_file, 'wb') as f:
+                pickle.dump(agent.memory_system.memories, f)
+            agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_emb)
+
+            # 更新进度文件
+            progress_data = {"last_session_idx": s_idx + 1, "updated_at": time.time()}
+            with open(progress_file, 'w') as f:
+                json.dump(progress_data, f, indent=4)
+            print(f"[sample_idx={sample.question_id}] saved cache and progress after session {s_idx}")
+
+        print(f"[sample_idx={sample.question_id}] finished all sessions")
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -101,8 +176,9 @@ def build_memory_longmem(samples: List[LongMemQA], model: str, backend: str,
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing samples"):
             future.result()
 
+
 def evaluate_longmemeval(samples: List[LongMemQA], model: str, backend: str,
-                         retrieve_k: int, temperature_c5: float, sglang_host: str, 
+                         retrieve_k: int, temperature_c5: float, sglang_host: str,
                          sglang_port: int, devices: List[str]):
     memories_dir = os.path.join(os.path.dirname(__file__), f"cached_memories_longmem_{backend}_{model}")
     results_file = f"./results/result_longmemeval_{model}.json"
@@ -125,7 +201,7 @@ def evaluate_longmemeval(samples: List[LongMemQA], model: str, backend: str,
 
             with open(mem_file, 'rb') as f:
                 agent.memory_system.memories = pickle.load(f)
-            
+
             if os.path.exists(ret_file):
                 agent.memory_system.retriever = agent.memory_system.retriever.load(ret_file, ret_emb)
             else:
@@ -196,6 +272,7 @@ def evaluate_longmemeval(samples: List[LongMemQA], model: str, backend: str,
                 print(f"  {k}: {v['mean']:.4f}")
     print("=" * 60)
 
+
 # ============================================================================
 # 主入口
 # ============================================================================
@@ -214,20 +291,21 @@ def main():
     args = parser.parse_args()
 
     samples = load_longmemeval_dataset(args.dataset)
-    devices = ["cuda:1" for i in range(32)] ##mengyao_debug 测试的并发
-    MAX_WORKERS = args.max_workers ##mengyao_debug build的并发
+    devices = ["cuda:1" for i in range(32)]  ##mengyao_debug 测试的并发
+    MAX_WORKERS = args.max_workers  ##mengyao_debug build的并发
     print(f"using {MAX_WORKERS} workers")
     if os.environ.get('DEBUG') == "1":
         MAX_WORKERS = 1
 
     if not args.skip_build:
         print("Building memories for LongMemEval...")
-        build_memory_longmem(samples, args.model, args.backend, args.retrieve_k, 
+        build_memory_longmem(samples, args.model, args.backend, args.retrieve_k,
                              args.temperature_c5, args.sglang_host, args.sglang_port, max_workers=MAX_WORKERS)
-    
+
     print("Evaluating LongMemEval...")
-    evaluate_longmemeval(samples, args.model, args.backend, args.retrieve_k, 
+    evaluate_longmemeval(samples, args.model, args.backend, args.retrieve_k,
                          args.temperature_c5, args.sglang_host, args.sglang_port, devices)
+
 
 if __name__ == "__main__":
     main()
