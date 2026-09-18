@@ -177,7 +177,7 @@ class HaluMemRobustTester:
 
                 # 2.1 执行 Answer (Agent 内部完成了检索与 Prompt 生成)
                 qa_start = time.time()
-                prediction, user_prompt, raw_context, raw_context_list, answer_p_tokens, answer_c_tokens = agent.answer_question(
+                prediction, user_prompt, raw_context, raw_context_list, answer_p_tokens, answer_c_tokens, query_prompt = agent.answer_question(
                     question, category=1, answer=reference
                 )
                 qa_time = time.time() - qa_start

@@ -1,9 +1,0 @@
-{
-  "example_idx": 4,
-  "sub_question_idx": 0,
-  "main_question": "When was the sibling of Alice de Lusignan, Countess of Surrey crowned?",
-  "sub_question": "Who were the siblings of Alice de Lusignan, Countess of Surrey?",
-  "ground_truth": "Alice de Lusignan had a uterine half-brother, King Henry III of England.",
-  "generated_answer": " King Henry III of England",
-  "num_answer_tokens": 5
-}

@@ -1,8 +1,12 @@
-token_consumption/
+__pycache__*
+results_*
+results_halumem_robust/
+data/
+token_consumption*
 data/input/
 data/simplerag/
 *.png
-cached_memories_robust_openai_deepseek-v3.2/
+cached_memories_*/
 .venv*/
 results/
 logs/

@@ -20,6 +20,7 @@ import logging
 import functools
 from datetime import datetime
 from abc import ABC, abstractmethod
+from fusionrag.sglang_kvcache import run_one_question_sglang, run_one_question_origin_sglang
 
 from memory_layer import SimpleEmbeddingRetriever, simple_tokenize
 from llm_text_parsers import (
@@ -33,6 +34,10 @@ from llm_text_parsers import (
     parse_strengthen_details,
     parse_update_neighbors,
     validate_analysis_result,
+    ANALYZE_CONTENT_PROMPT_PREFIX,
+    ANALYZE_CONTENT_PROMPT_QUERY, EVOLUTION_DECISION_PROMPT_PREFIX, EVOLUTION_DECISION_PROMPT_QUERY,
+    STRENGTHEN_DETAILS_PROMPT_PREFIX, STRENGTHEN_DETAILS_PROMPT_QUERY, UPDATE_NEIGHBORS_PROMPT_PREFIX,
+    UPDATE_NEIGHBORS_PROMPT_QUERY
 )
 
 logger = logging.getLogger("amem_robust")
@@ -95,7 +100,7 @@ class RobustBaseLLMController(ABC):
 
 
 class RobustOpenAIController(RobustBaseLLMController):
-    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, sglang_host: str="", sglang_port: int=0) -> None:
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, sglang_host: str="", sglang_port: int=0, fusion_rag_model=None) -> None:
         try:
             from openai import OpenAI
         except ImportError:
@@ -110,6 +115,12 @@ class RobustOpenAIController(RobustBaseLLMController):
         else:
             base_url = f"{sglang_host}:{sglang_port}/v1"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.sglang_url = f"{base_url}/completions"
+        self.sglang_url_prefiller = f"{base_url}/completions"
+        self.fusion_rag_model = fusion_rag_model
+        if os.environ.get("FUSIONRAG", "false").lower() == "true":
+            if fusion_rag_model is None:
+                raise
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.0) -> str:
@@ -148,6 +159,75 @@ class RobustOpenAIController(RobustBaseLLMController):
             }
         )
         return response.choices[0].message.content, response.usage.prompt_tokens, response.usage.completion_tokens
+
+    def generate_response_with_fusionrag(
+        self,
+        system_prompt: str,
+        prefix: str,
+        fusionrag_cache_list: list[str],
+        query_prompt: str,
+        model: str="qwen3-8b",
+        max_tokens = 5000
+    ) -> (str, dict, dict):
+
+        system_prompt = self.SYSTEM_MESSAGE
+        template = {
+            "DEFAULT_SYSTEM_PROMPT": f"""<|im_start|>system\n{system_prompt}\n{prefix}""",
+            "USER_PROMPT": f"""<|im_end|>\n<|im_start|>user\n\nQuestion: /no_think {query_prompt}<|im_end|>\n<|im_start|>assistant\nAnswer: </think>"""
+        }
+
+        fusionrag_cache_list_text = "".join(fusionrag_cache_list)
+        system_len = len(self.fusion_rag_model.draft_model_tokenizer.encode(template["DEFAULT_SYSTEM_PROMPT"]))
+        query_len = len(self.fusion_rag_model.draft_model_tokenizer.encode(template["USER_PROMPT"]))
+        origin_text_list_len = len(self.fusion_rag_model.draft_model_tokenizer.encode(fusionrag_cache_list_text))
+
+        recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before, selected_indices = self.fusion_rag_model.draft_one_question(
+            template["DEFAULT_SYSTEM_PROMPT"],  ## DEFAULT_SYSTEM_PROMPT
+            fusionrag_cache_list,
+            template["USER_PROMPT"],
+            float(os.getenv("recompute_rate", "0.3")),
+            "",
+            False,
+            False,
+            [],
+            False,
+            False,  ## if do preprocess
+            False,
+            True
+        )
+
+        try:
+            content, usage, top_logprobs, real_recomputation_rate = run_one_question_sglang(
+                DEFAULT_SYSTEM_PROMPT=template["DEFAULT_SYSTEM_PROMPT"],
+                USER_PROMPT=template["USER_PROMPT"],
+                MODEL=model,
+                retrived_docs=fusionrag_cache_list,
+                max_tokens=max_tokens,  ## max tokens.
+                retrived_docs_relevant_docs=[],
+                recompute_tokens=recompute_tokens,
+                recompute_tokens_list=recompute_tokens_list,
+                max_workers=1,  ## max_workers.
+                recomputation_rate=float(os.getenv("recompute_rate", "0.3")),
+                model_use=model,
+                endpoint_url=self.sglang_url,
+                prefiller_endpoint_url=self.sglang_url_prefiller,
+                method_keyword="",
+            )
+
+            usage_info = {
+                "prompt_tokens": usage["prompt_tokens"],
+                "completion_tokens": usage["completion_tokens"],
+                "total_tokens": usage["total_tokens"],
+            }
+
+            return content, usage_info, {
+                "system_len": system_len,
+                "query_len": query_len,
+                "origin_text_list_len": origin_text_list_len,
+                "fusionrag_text_list_len":  len(selected_indices),
+            }
+        except Exception as e:
+            print(e)
 
 
 class RobustOllamaController(RobustBaseLLMController):
@@ -313,9 +393,10 @@ class RobustLLMController:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 fusion_rag_model=None):
         if backend == "openai":
-            self.llm = RobustOpenAIController(model, api_key, sglang_host, sglang_port)
+            self.llm = RobustOpenAIController(model, api_key, sglang_host, sglang_port, fusion_rag_model)
         elif backend == "ollama":
             self.llm = RobustOllamaController(model)
         elif backend == "sglang":
@@ -355,8 +436,11 @@ class RobustMemoryNote:
 
         self.init_prompt_tokens = 0
         self.init_completion_tokens = 0
+        self.init_fusionrag_stats = []
         if llm_controller and any(p is None for p in [keywords, context, category, tags]):
-            analysis, self.init_prompt_tokens, self.init_completion_tokens = self.analyze_content(content, llm_controller)
+            analysis, self.init_prompt_tokens, self.init_completion_tokens, fusionrag_stats = self.analyze_content(content, llm_controller)
+            if fusionrag_stats is not None:
+                self.init_fusionrag_stats.append(fusionrag_stats)
             logger.debug("analysis result: %s", analysis)
             keywords = keywords or analysis["keywords"]
             context = context or analysis["context"]
@@ -381,11 +465,23 @@ class RobustMemoryNote:
 
 
     @staticmethod
-    def analyze_content(content: str, llm_controller: RobustLLMController) -> (Dict, int, int):
+    def analyze_content(content: str, llm_controller: RobustLLMController) -> (Dict, int, int, dict):
         """Analyze content using plain-text prompt + section-marker parsing."""
         prompt = ANALYZE_CONTENT_PROMPT.format(content=content)
+        fusionrag_stats = None
         try:
-            response, prompt_tokens, completion_tokens = llm_controller.llm.get_completion_with_token(prompt)
+            if os.environ.get("FUSIONRAG", "false").lower() == "true":
+                response, usage_info, fusionrag_stats = llm_controller.llm.generate_response_with_fusionrag(
+                    system_prompt="",
+                    prefix=ANALYZE_CONTENT_PROMPT_PREFIX,
+                    fusionrag_cache_list=[content],
+                    query_prompt=ANALYZE_CONTENT_PROMPT_QUERY
+                )
+                prompt_tokens = usage_info["prompt_tokens"]
+                completion_tokens = usage_info["completion_tokens"]
+                fusionrag_stats["reuse_type"] = "reuse_prefill"
+            else:
+                response, prompt_tokens, completion_tokens = llm_controller.llm.get_completion_with_token(prompt)
             analysis = parse_analyze_content(response, content)
 
             # If keywords still empty after parsing, try focused retry
@@ -398,7 +494,7 @@ class RobustMemoryNote:
 
             # Final validation
             analysis = validate_analysis_result(analysis, content)
-            return analysis, prompt_tokens, completion_tokens
+            return analysis, prompt_tokens, completion_tokens, fusionrag_stats
 
         except Exception as e:
             logger.error("Error analyzing content: %s", e)
@@ -408,7 +504,7 @@ class RobustMemoryNote:
                 "keywords": _heuristic_keywords(content),
                 "context": _heuristic_context(content),
                 "tags": _heuristic_keywords(content, 3),
-            }, 0, 0
+            }, 0, 0, fusionrag_stats
 
 
 # ---------------------------------------------------------------------------
@@ -427,13 +523,15 @@ class RobustAgenticMemorySystem:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 fusion_rag_model=None):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
             sglang_host, sglang_port, check_connection,
+            fusion_rag_model=fusion_rag_model
         )
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold
@@ -448,7 +546,8 @@ class RobustAgenticMemorySystem:
             timestamp=time,
             **kwargs,
         )
-        evo_label, note, prompt_tokens, completion_tokens = self.process_memory(note)
+        evo_label, note, prompt_tokens, completion_tokens, fusionrag_stats_list = self.process_memory(note)
+        fusionrag_stats_list.extend(note.init_fusionrag_stats)
         self.memories[note.id] = note
         self.retriever.add_documents([
             "content:" + note.content +
@@ -460,7 +559,7 @@ class RobustAgenticMemorySystem:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
                 self.consolidate_memories()
-        return note.id, note.init_prompt_tokens + prompt_tokens, note.init_completion_tokens + completion_tokens
+        return note.id, note.init_prompt_tokens + prompt_tokens, note.init_completion_tokens + completion_tokens, fusionrag_stats_list
 
     def consolidate_memories(self):
         """Re-initialize the retriever with current memory state."""
@@ -548,38 +647,77 @@ class RobustAgenticMemorySystem:
         neighbor_memory, indices = self.find_related_memories(note.content, k=5)
         prompt_tokens = 0
         completion_tokens = 0
+        fusionrag_stats_list = []
 
         if len(indices) == 0:
-            return False, note, 0, 0
+            return False, note, 0, 0, fusionrag_stats_list
 
         try:
             # ---- Call 1: Evolution decision ----
-            decision_prompt = EVOLUTION_DECISION_PROMPT.format(
-                context=note.context,
-                content=note.content,
-                keywords=note.keywords,
-                nearest_neighbors_memories=neighbor_memory,
-            )
-            decision_response, prompt_tokens_1, completion_tokens_1 = self.llm_controller.llm.get_completion_with_token(decision_prompt)
+            if os.environ.get("FUSIONRAG", "false").lower() == "true":
+                decision_response, usage, fusionrag_stats = self.llm_controller.llm.generate_response_with_fusionrag(
+                    system_prompt="",
+                    prefix=EVOLUTION_DECISION_PROMPT_PREFIX,
+                    fusionrag_cache_list=[
+                        note.context,
+                        "Content: " + note.content,
+                        "Keywords: " + "".join(note.keywords),
+                        "Nearest neighbor memories: " + neighbor_memory
+                    ],
+                    query_prompt=EVOLUTION_DECISION_PROMPT_QUERY
+                )
+                fusionrag_stats["reuse_type"] = "reuse_mix"
+                fusionrag_stats_list.append(fusionrag_stats)
+                prompt_tokens_1 = usage["prompt_tokens"]
+                completion_tokens_1 = usage["completion_tokens"]
+
+            else:
+                decision_prompt = EVOLUTION_DECISION_PROMPT.format(
+                    context=note.context,
+                    content=note.content,
+                    keywords=note.keywords,
+                    nearest_neighbors_memories=neighbor_memory,
+                )
+                decision_response, prompt_tokens_1, completion_tokens_1 = self.llm_controller.llm.get_completion_with_token(decision_prompt)
+
             prompt_tokens += prompt_tokens_1
             completion_tokens += completion_tokens_1
+
             decision = parse_evolution_decision(decision_response)
             logger.debug("Evolution decision: %s", decision)
 
             if decision["decision"] == "NO_EVOLUTION":
-                return False, note, 0, 0
+                return False, note, 0, 0, fusionrag_stats_list
 
             should_strengthen = decision["decision"] in ("STRENGTHEN", "STRENGTHEN_AND_UPDATE")
             should_update = decision["decision"] in ("UPDATE_NEIGHBOR", "STRENGTHEN_AND_UPDATE")
 
             # ---- Call 2: Strengthen details (conditional) ----
             if should_strengthen:
-                strengthen_prompt = STRENGTHEN_DETAILS_PROMPT.format(
-                    content=note.content,
-                    keywords=note.keywords,
-                    nearest_neighbors_memories=neighbor_memory,
-                )
-                strengthen_response, prompt_tokens_2, completion_tokens_2 = self.llm_controller.llm.get_completion_with_token(strengthen_prompt)
+                if os.environ.get("FUSIONRAG", "false").lower() == "true":
+                    strengthen_response, usage, fusionrag_stats = self.llm_controller.llm.generate_response_with_fusionrag(
+                        system_prompt="",
+                        prefix=STRENGTHEN_DETAILS_PROMPT_PREFIX,
+                        fusionrag_cache_list=[
+                            "Content: " + note.content,
+                            "Keywords: " + "".join(note.keywords),
+                            "Nearest neighbor memories:\n" + neighbor_memory
+                        ],
+                        query_prompt=STRENGTHEN_DETAILS_PROMPT_QUERY
+                    )
+                    fusionrag_stats["reuse_type"] = "reuse_mix"
+                    fusionrag_stats_list.append(fusionrag_stats)
+                    prompt_tokens_2 = usage["prompt_tokens"]
+                    completion_tokens_2 = usage["completion_tokens"]
+
+                else:
+                    strengthen_prompt = STRENGTHEN_DETAILS_PROMPT.format(
+                        content=note.content,
+                        keywords=note.keywords,
+                        nearest_neighbors_memories=neighbor_memory,
+                    )
+                    strengthen_response, prompt_tokens_2, completion_tokens_2 = self.llm_controller.llm.get_completion_with_token(strengthen_prompt)
+
                 prompt_tokens += prompt_tokens_2
                 completion_tokens += completion_tokens_2
                 strengthen = parse_strengthen_details(strengthen_response)
@@ -591,14 +729,35 @@ class RobustAgenticMemorySystem:
 
             # ---- Call 3: Update neighbors (conditional) ----
             if should_update:
-                update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
-                    content=note.content,
-                    context=note.context,
-                    nearest_neighbors_memories=neighbor_memory,
-                    max_neighbor_idx=len(indices) - 1,
-                    neighbor_count=len(indices),
-                )
-                update_response, prompt_tokens_3, completion_tokens_3 = self.llm_controller.llm.get_completion_with_token(update_prompt)
+                if os.environ.get("FUSIONRAG", "false").lower() == "true":
+                    update_response, usage, fusionrag_stats = self.llm_controller.llm.generate_response_with_fusionrag(
+                        system_prompt="",
+                        prefix=UPDATE_NEIGHBORS_PROMPT_PREFIX,
+                        fusionrag_cache_list=[
+                            "Content: " + note.content,
+                            "Context: " + note.context,
+                            "Nearest neighbor memories:\n" + neighbor_memory
+                        ],
+                        query_prompt=UPDATE_NEIGHBORS_PROMPT_QUERY.format(
+                            max_neighbor_idx=len(indices) - 1,
+                            neighbor_count=len(indices),
+                        )
+                    )
+                    fusionrag_stats["reuse_type"] = "reuse_mix"
+                    fusionrag_stats_list.append(fusionrag_stats)
+                    prompt_tokens_3 = usage["prompt_tokens"]
+                    completion_tokens_3 = usage["completion_tokens"]
+
+                else:
+                    update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
+                        content=note.content,
+                        context=note.context,
+                        nearest_neighbors_memories=neighbor_memory,
+                        max_neighbor_idx=len(indices) - 1,
+                        neighbor_count=len(indices),
+                    )
+                    update_response, prompt_tokens_3, completion_tokens_3 = self.llm_controller.llm.get_completion_with_token(update_prompt)
+
                 prompt_tokens += prompt_tokens_3
                 completion_tokens += completion_tokens_3
                 neighbor_updates = parse_update_neighbors(update_response, len(indices))
@@ -618,8 +777,8 @@ class RobustAgenticMemorySystem:
                         notetmp.context = upd["context"]
                     self.memories[notes_id[memorytmp_idx]] = notetmp
 
-            return True, note, prompt_tokens, completion_tokens
+            return True, note, prompt_tokens, completion_tokens, fusionrag_stats_list
 
         except Exception as e:
             logger.error("Evolution failed for note %s: %s — storing without evolution", note.id, e)
-            return False, note, prompt_tokens, completion_tokens
+            return False, note, prompt_tokens, completion_tokens, fusionrag_stats_list

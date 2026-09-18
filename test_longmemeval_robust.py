@@ -134,7 +134,7 @@ def evaluate_longmemeval(samples: List[LongMemQA], model: str, backend: str,
                 )
 
             # 执行预测 (映射为 Category 1 标准问题)
-            prediction, user_prompt, raw_context, raw_context_list, p_tokens, c_tokens = agent.answer_question(
+            prediction, user_prompt, raw_context, raw_context_list, p_tokens, c_tokens, query_prompt = agent.answer_question(
                 sample.question, category=1, answer=sample.answer
             )
             prediction = parse_plain_text_answer(prediction)
@@ -219,6 +219,7 @@ def main():
     print(f"using {MAX_WORKERS} workers")
     if os.environ.get('DEBUG') == "1":
         MAX_WORKERS = 1
+        samples = samples[:200]
 
     if not args.skip_build:
         print("Building memories for LongMemEval...")

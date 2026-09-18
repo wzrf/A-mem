@@ -671,23 +671,25 @@ def main():
 
     # 在这里配置要依次评测的文件
     file_paths = [
-        "results/result__0.3_Qwen2.5-3B-Instruct_qwen2.5-7B_retrieve_10.json", ## qwen+locomo
-        "results_GLM_4.5_air/retrieve_10.json", ## glm+locomo
-        "results_Kimi_k26/retrieve_10.json", ## kimi+locomo
+        # "results/result__0.3_Qwen2.5-3B-Instruct_qwen2.5-7B_retrieve_10.json", ## qwen+locomo
+        # "results_GLM_4.5_air/retrieve_10.json", ## glm+locomo
+        # "results_Kimi_k26/retrieve_10.json", ## kimi+locomo
+        #
+        # "results/result_longmemeval_qwen3-8b.json"
 
-        "results/result_longmemeval_qwen3-8b.json"
+        "results/result_longmemeval_GLM-4.5-Air.json"
     ]
 
     # 在这里配置要依次运行的目录和对应 name
     run_dirs = [
-        ("./token_consumption_qwen3-8b", "locomo"),
-        ("./token_consumption_qwen3-8b", "longmemeval"),
-
-        ("./token_consumption_GLM-4.5-Air", "locomo"),
+        # ("./token_consumption_qwen3-8b", "locomo"),
+        # ("./token_consumption_qwen3-8b", "longmemeval"),
+        #
+        # ("./token_consumption_GLM-4.5-Air", "locomo"),
         ("./token_consumption_GLM-4.5-Air", "longmemeval"),
 
-        ("./token_consumption_Kimi-K2.6", "locomo"),
-        ("./token_consumption_Kimi-K2.6", "longmemeval"),
+        # ("./token_consumption_Kimi-K2.6", "locomo"),
+        # ("./token_consumption_Kimi-K2.6", "longmemeval"),
     ]
 
     # 确保 NLTK punkt 分词数据可用
