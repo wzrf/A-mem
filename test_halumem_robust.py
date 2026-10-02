@@ -108,7 +108,14 @@ class HaluMemRobustTester:
           2. 对当前 Session 的 Questions 进行检索与回答，统计 QA 的 Token 开销。
         """
         safe_sample_id = sample.sample_id.replace(" ", "_")
-        token_consumption_file = f"./token_consumption/halumem_{safe_sample_id}.json"
+        token_consumption_dir = "token_consumption_halumem"
+        if self.model.lower() not in ["qwen3-8b", "qwen3_8b"]:
+            token_consumption_dir += f"_{self.model.lower()}"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(token_consumption_dir, exist_ok=True)
+        print(f"token_consumption_dir= {token_consumption_dir}")
+        print(f"save_dir = {save_dir}")
+        token_consumption_file = f"./{token_consumption_dir}/halumem_{safe_sample_id}.json"
 
         # 检查是否已经处理了所有问题
         result_file = os.path.join(save_dir, f"{safe_sample_id}.json")
@@ -123,6 +130,8 @@ class HaluMemRobustTester:
             avg_f1 = sum(r['metrics'].get('f1', 0) for r in sample_results) / len(sample_results) if sample_results else 0
             print(f"[{sample_idx}] Sample ID: {safe_sample_id} | Total Queries: {len(sample_results)} | Avg F1: {avg_f1:.3f} (已存在)")
             return sample_results
+
+        print(f"token_consumption_file= {token_consumption_file}")
 
         # 为当前 Sample 初始化专属的 Memory Agent 实例
         agent = RobustAdvancedMemAgent(
@@ -246,8 +255,6 @@ def main():
     parser.add_argument("--temperature_c5", type=float, default=0.5)
     parser.add_argument("--sglang_host", type=str, default="http://localhost")
     parser.add_argument("--sglang_port", type=int, default=30000)
-    parser.add_argument("--output-dir", type=str, default="./results_halumem_robust",
-                        help="Directory to save evaluation results")
     args = parser.parse_args()
 
     # 1. 加载 HaluMem 数据集
@@ -260,6 +267,9 @@ def main():
     # 工作线程函数
     def _worker(idx_sample):
         idx, sample = idx_sample
+        output_dir = "./results_halumem"
+        if args.model.lower() not in ["qwen3-8b", "qwen3_8b"]:
+            output_dir += "_" + args.model.lower()
         tester = HaluMemRobustTester(
             model=args.model,
             backend=args.backend,
@@ -268,7 +278,7 @@ def main():
             sglang_host=args.sglang_host,
             sglang_port=args.sglang_port
         )
-        return tester.run_single_sample(sample, idx, save_dir=args.output_dir)
+        return tester.run_single_sample(sample, idx, save_dir=output_dir)
 
     all_flattened_results = []
     print(f"Starting evaluation across {len(samples)} samples with {max_workers} workers...")

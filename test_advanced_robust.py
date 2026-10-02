@@ -164,7 +164,7 @@ class RobustAdvancedMemAgent:
         self.encoder = encoder
         self.rag_indices = rag_indices
         self.rag_id2texts = rag_id2texts
-        self.tokens_comsumption = []
+        self.tokens_consumption = []
         self.token_consumption_file = token_consumption_file
 
         self.memory_system = RobustAgenticMemorySystem(
@@ -187,18 +187,19 @@ class RobustAdvancedMemAgent:
         self.temperature_c5 = temperature_c5
 
     def add_memory(self, content, time=None):
-        _, prompt_tokens, completion_tokens, fusionrag_stats_list = self.memory_system.add_note(content, time=time)
-        self.tokens_comsumption.append(
+        _, prompt_tokens, completion_tokens, fusionrag_stats_list, call_record_list = self.memory_system.add_note(content, time=time)
+        self.tokens_consumption.append(
             {
                 # "content": content,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "fusionrag_stats": fusionrag_stats_list,
+                "call_record_list": call_record_list
             }
         )
         if self.token_consumption_file != "":
             with open(self.token_consumption_file, "w") as f:
-                json.dump(self.tokens_comsumption, f, indent=4)
+                json.dump(self.tokens_consumption, f, indent=4)
         return prompt_tokens, completion_tokens
 
 
@@ -296,7 +297,7 @@ Question: {question} Short answer:"""
                 prompt_tokens = 0
                 completion_tokens = 0
             else:
-                response, prompt_tokens, completion_tokens = self.memory_system.llm_controller.llm.get_completion_with_token(
+                response, prompt_tokens, completion_tokens, _, _ = self.memory_system.llm_controller.llm.get_completion_with_token(
                     user_prompt, temperature=temperature,
                 )
         except Exception as e:
@@ -352,6 +353,7 @@ Question: {question} Short answer:"""
 
 
         query_draft = user_prompt.format(question=question)
+        raw_context_list = raw_context_list[:20]
         content, usage, _ = self.retriever_llm.llm.generate_response_with_fusionrag(
             system_prompt="",
             prefix="",
@@ -719,7 +721,7 @@ def evaluate_dataset(
                 draft_model_name="qwen2.5-3b",
                 preprocess_model_path="/data2/qy_tmp/xumengyao/bge-m3",
                 draft_model_path="/mnt/qjhs-sh-lab-01/models/Qwen2.5-3B-Instruct",
-                draft_model_url="http://127.0.0.1:30005/v1/completions",
+                draft_model_url="http://127.0.0.1:30015/v1/completions",
                 apikey="xxx",
                 use_local_draft_model=False,
             )

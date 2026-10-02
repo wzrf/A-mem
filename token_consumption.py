@@ -11,30 +11,83 @@ import threading
 from tqdm import tqdm
 import time
 
+SYSTEM_MESSAGE = "Follow the format specified in the prompt exactly. Do not add extra commentary."
+
+ANALYZE_CONTENT_PROMPT_PREFIX = """Analyze the following content and provide:
+1. KEYWORDS: The most important keywords (nouns, verbs, key concepts). Order from most to least important. At least three keywords. Do not include speaker names or time references.
+2. CONTEXT: One sentence summarizing the main topic, key points, and purpose.
+3. TAGS: Broad categories/themes for classification (domain, format, type). At least three tags.
+
+Respond using EXACTLY this format (one section per header):
+
+KEYWORDS: keyword1, keyword2, keyword3, ...
+CONTEXT: A single sentence summarizing the content.
+TAGS: tag1, tag2, tag3, ...
+
+Content for analysis:
+"""
+
+EVOLUTION_DECISION_PROMPT_PREFIX = """You are an AI memory evolution agent. Analyze the new memory note and its nearest neighbors to decide if evolution is needed.
+
+New memory:
+"""
+
+STRENGTHEN_DETAILS_PROMPT_PREFIX = """Given the new memory and its neighbors, provide updated connections and tags.
+
+New memory:
+"""
+
+UPDATE_NEIGHBORS_PROMPT_PREFIX = """Given the new memory and its neighbor memories, update each neighbor's context and tags based on a holistic understanding of all these memories together.
+
+New memory:"""
+
+
 def run_dir(path: str, name: str):
+    if "qwen" in path.lower():
+        model_path = "/mnt/qjhs-sh-lab-01/models/Qwen3-8B/"
+    elif "glm" in path.lower():
+        model_path = "/mnt/qjhs-sh-lab-04/models/GLM-4.5-Air"
+    elif "kimi" in path.lower():
+        model_path = "/mnt/qjhs-sh-lab-01/models/Kimi-K2.6"
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    ## mengyao_debug 这个是错的，因为在代码里每一轮请求合并在一起了。
+    prefix_len = [
+        len(tokenizer.tokenize(SYSTEM_MESSAGE + ANALYZE_CONTENT_PROMPT_PREFIX)),
+        len(tokenizer.tokenize(SYSTEM_MESSAGE + EVOLUTION_DECISION_PROMPT_PREFIX)),
+        len(tokenizer.tokenize(SYSTEM_MESSAGE + STRENGTHEN_DETAILS_PROMPT_PREFIX)),
+        len(tokenizer.tokenize(SYSTEM_MESSAGE + UPDATE_NEIGHBORS_PROMPT_PREFIX)),
+    ]
     json_files = Path(path).glob("*.json")
     all_prompt_tokens = []
     all_completion_tokens = []
+    all_prefix_len = []
     for file in json_files:
         if name in file.name:
             with open(file, "r", encoding="utf-8") as f:
                 datas = json.load(f)
                 prompt_tokens = 0
                 completion_tokens = 0
-                for data in datas:
+                prefix_tokens = 0
+                for data_id, data in enumerate(datas):
                     prompt_tokens += data["prompt_tokens"]
                     completion_tokens += data["completion_tokens"]
+                    prefix_tokens += prefix_len[data_id % len(prefix_len)]
 
             if prompt_tokens > 0:
                 all_prompt_tokens.append(prompt_tokens)
             if completion_tokens > 0:
                 all_completion_tokens.append(completion_tokens)
+            if prefix_tokens > 0:
+                all_prefix_len.append(prefix_tokens)
 
     if len(all_prompt_tokens) > 0 and len(all_completion_tokens) > 0:
         print(f"path: {path}\n"
               f"name: {name}\n"
-              f"average prompt_tokens: {sum(all_prompt_tokens)/len(all_prompt_tokens)} "
-              f"average completion_tokens: {sum(all_completion_tokens)/len(all_completion_tokens)}")
+              f"average prompt_tokens: {sum(all_prompt_tokens) / len(all_prompt_tokens)} "
+              f"\033[33maverage prompt_tokens without prefix: "
+              f"{(sum(all_prompt_tokens) - sum(all_prefix_len)) / len(all_prompt_tokens)}\033[0m "
+              f"average completion_tokens: {sum(all_completion_tokens) / len(all_completion_tokens)}")
         print("="*100)
 
 
@@ -675,21 +728,26 @@ def main():
         # "results_GLM_4.5_air/retrieve_10.json", ## glm+locomo
         # "results_Kimi_k26/retrieve_10.json", ## kimi+locomo
         #
-        # "results/result_longmemeval_qwen3-8b.json"
+        # "results/result_longmemeval_qwen3-8b.json",
 
-        "results/result_longmemeval_GLM-4.5-Air.json"
+        # "results/result_longmemeval_GLM-4.5-Air.json",
+
+        # "results_fusionrag/retrieve_10_fusionrag.json" ##locomo+fusionrag
+
+        # "results/result_longmemeval_Kimi-K2.6.json", ## longmem-kimi
     ]
 
     # 在这里配置要依次运行的目录和对应 name
     run_dirs = [
-        # ("./token_consumption_qwen3-8b", "locomo"),
-        # ("./token_consumption_qwen3-8b", "longmemeval"),
+        # ("./token_consumption_fusionrag/", "locomo"),
+        ("./token_consumption_qwen3-8b", "locomo"),
+        ("./token_consumption_qwen3-8b", "longmemeval"),
         #
-        # ("./token_consumption_GLM-4.5-Air", "locomo"),
+        ("./token_consumption_GLM-4.5-Air", "locomo"),
         ("./token_consumption_GLM-4.5-Air", "longmemeval"),
 
-        # ("./token_consumption_Kimi-K2.6", "locomo"),
-        # ("./token_consumption_Kimi-K2.6", "longmemeval"),
+        ("./token_consumption_Kimi-K2.6", "locomo"),
+        ("./token_consumption_Kimi-K2.6", "longmemeval"),
     ]
 
     # 确保 NLTK punkt 分词数据可用

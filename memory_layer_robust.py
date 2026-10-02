@@ -143,14 +143,15 @@ class RobustOpenAIController(RobustBaseLLMController):
 
     @retry_llm_call(max_retries=2)
     def get_completion_with_token(self, prompt: str, temperature: float = 0.7) -> (str, int, int):
+        messages = [
+            {"role": "system", "content": self.SYSTEM_MESSAGE},
+            {"role": "user", "content": prompt}
+        ]
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_MESSAGE},
-                {"role": "user", "content": prompt}
-            ],
+            messages=messages,
             temperature=temperature,
-            max_tokens=1000,
+            max_tokens=10000,
             extra_body={
                 "chat_template_kwargs": {
                     "enable_thinking": False,
@@ -158,7 +159,7 @@ class RobustOpenAIController(RobustBaseLLMController):
                 }
             }
         )
-        return response.choices[0].message.content, response.usage.prompt_tokens, response.usage.completion_tokens
+        return response.choices[0].message.content, response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.model_dump(), messages
 
     def generate_response_with_fusionrag(
         self,
@@ -185,7 +186,7 @@ class RobustOpenAIController(RobustBaseLLMController):
             template["DEFAULT_SYSTEM_PROMPT"],  ## DEFAULT_SYSTEM_PROMPT
             fusionrag_cache_list,
             template["USER_PROMPT"],
-            float(os.getenv("recompute_rate", "0.3")),
+            0.7, ##
             "",
             False,
             False,
@@ -437,10 +438,13 @@ class RobustMemoryNote:
         self.init_prompt_tokens = 0
         self.init_completion_tokens = 0
         self.init_fusionrag_stats = []
+        self.init_call_record = []
         if llm_controller and any(p is None for p in [keywords, context, category, tags]):
-            analysis, self.init_prompt_tokens, self.init_completion_tokens, fusionrag_stats = self.analyze_content(content, llm_controller)
+            analysis, self.init_prompt_tokens, self.init_completion_tokens, fusionrag_stats, call_record = self.analyze_content(content, llm_controller)
             if fusionrag_stats is not None:
                 self.init_fusionrag_stats.append(fusionrag_stats)
+            if call_record is not None:
+                self.init_call_record.append(call_record)
             logger.debug("analysis result: %s", analysis)
             keywords = keywords or analysis["keywords"]
             context = context or analysis["context"]
@@ -470,18 +474,28 @@ class RobustMemoryNote:
         prompt = ANALYZE_CONTENT_PROMPT.format(content=content)
         fusionrag_stats = None
         try:
+            time_start = time.time()
             if os.environ.get("FUSIONRAG", "false").lower() == "true":
                 response, usage_info, fusionrag_stats = llm_controller.llm.generate_response_with_fusionrag(
                     system_prompt="",
-                    prefix=ANALYZE_CONTENT_PROMPT_PREFIX,
-                    fusionrag_cache_list=[content],
+                    prefix="",
+                    fusionrag_cache_list=[ANALYZE_CONTENT_PROMPT_PREFIX, content],
                     query_prompt=ANALYZE_CONTENT_PROMPT_QUERY
                 )
+                messages = {}
                 prompt_tokens = usage_info["prompt_tokens"]
                 completion_tokens = usage_info["completion_tokens"]
                 fusionrag_stats["reuse_type"] = "reuse_prefill"
             else:
-                response, prompt_tokens, completion_tokens = llm_controller.llm.get_completion_with_token(prompt)
+                response, prompt_tokens, completion_tokens, usage_info, messages = llm_controller.llm.get_completion_with_token(prompt)
+            time_end = time.time()
+            call_record = {
+                "metadata_messages": messages,
+                "prefix": llm_controller.llm.SYSTEM_MESSAGE + ANALYZE_CONTENT_PROMPT_PREFIX,
+                "response": response,
+                "usage": usage_info,
+                "time": time_end - time_start,
+            }
             analysis = parse_analyze_content(response, content)
 
             # If keywords still empty after parsing, try focused retry
@@ -494,7 +508,7 @@ class RobustMemoryNote:
 
             # Final validation
             analysis = validate_analysis_result(analysis, content)
-            return analysis, prompt_tokens, completion_tokens, fusionrag_stats
+            return analysis, prompt_tokens, completion_tokens, fusionrag_stats, call_record
 
         except Exception as e:
             logger.error("Error analyzing content: %s", e)
@@ -546,8 +560,9 @@ class RobustAgenticMemorySystem:
             timestamp=time,
             **kwargs,
         )
-        evo_label, note, prompt_tokens, completion_tokens, fusionrag_stats_list = self.process_memory(note)
+        evo_label, note, prompt_tokens, completion_tokens, fusionrag_stats_list, call_record_list = self.process_memory(note)
         fusionrag_stats_list.extend(note.init_fusionrag_stats)
+        call_record_list.extend(note.init_call_record)
         self.memories[note.id] = note
         self.retriever.add_documents([
             "content:" + note.content +
@@ -559,7 +574,7 @@ class RobustAgenticMemorySystem:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
                 self.consolidate_memories()
-        return note.id, note.init_prompt_tokens + prompt_tokens, note.init_completion_tokens + completion_tokens, fusionrag_stats_list
+        return note.id, note.init_prompt_tokens + prompt_tokens, note.init_completion_tokens + completion_tokens, fusionrag_stats_list, call_record_list
 
     def consolidate_memories(self):
         """Re-initialize the retriever with current memory state."""
@@ -648,17 +663,19 @@ class RobustAgenticMemorySystem:
         prompt_tokens = 0
         completion_tokens = 0
         fusionrag_stats_list = []
+        call_record_list = []
 
         if len(indices) == 0:
-            return False, note, 0, 0, fusionrag_stats_list
+            return False, note, 0, 0, fusionrag_stats_list, call_record_list
 
         try:
             # ---- Call 1: Evolution decision ----
             if os.environ.get("FUSIONRAG", "false").lower() == "true":
                 decision_response, usage, fusionrag_stats = self.llm_controller.llm.generate_response_with_fusionrag(
                     system_prompt="",
-                    prefix=EVOLUTION_DECISION_PROMPT_PREFIX,
+                    prefix="",
                     fusionrag_cache_list=[
+                        EVOLUTION_DECISION_PROMPT_PREFIX,
                         note.context,
                         "Content: " + note.content,
                         "Keywords: " + "".join(note.keywords),
@@ -672,13 +689,23 @@ class RobustAgenticMemorySystem:
                 completion_tokens_1 = usage["completion_tokens"]
 
             else:
+                time_start = time.time()
                 decision_prompt = EVOLUTION_DECISION_PROMPT.format(
                     context=note.context,
                     content=note.content,
                     keywords=note.keywords,
                     nearest_neighbors_memories=neighbor_memory,
                 )
-                decision_response, prompt_tokens_1, completion_tokens_1 = self.llm_controller.llm.get_completion_with_token(decision_prompt)
+                time_end = time.time()
+                decision_response, prompt_tokens_1, completion_tokens_1, usage_info, messages = self.llm_controller.llm.get_completion_with_token(decision_prompt)
+                call_record = {
+                    "metadata_messages": messages,
+                    "prefix": self.llm_controller.llm.SYSTEM_MESSAGE + EVOLUTION_DECISION_PROMPT_PREFIX,
+                    "response": decision_response,
+                    "usage": usage_info,
+                    "time": time_end - time_start,
+                }
+                call_record_list.append(call_record)
 
             prompt_tokens += prompt_tokens_1
             completion_tokens += completion_tokens_1
@@ -687,7 +714,7 @@ class RobustAgenticMemorySystem:
             logger.debug("Evolution decision: %s", decision)
 
             if decision["decision"] == "NO_EVOLUTION":
-                return False, note, 0, 0, fusionrag_stats_list
+                return False, note, 0, 0, fusionrag_stats_list, call_record_list
 
             should_strengthen = decision["decision"] in ("STRENGTHEN", "STRENGTHEN_AND_UPDATE")
             should_update = decision["decision"] in ("UPDATE_NEIGHBOR", "STRENGTHEN_AND_UPDATE")
@@ -697,8 +724,9 @@ class RobustAgenticMemorySystem:
                 if os.environ.get("FUSIONRAG", "false").lower() == "true":
                     strengthen_response, usage, fusionrag_stats = self.llm_controller.llm.generate_response_with_fusionrag(
                         system_prompt="",
-                        prefix=STRENGTHEN_DETAILS_PROMPT_PREFIX,
+                        prefix="",
                         fusionrag_cache_list=[
+                            STRENGTHEN_DETAILS_PROMPT_PREFIX,
                             "Content: " + note.content,
                             "Keywords: " + "".join(note.keywords),
                             "Nearest neighbor memories:\n" + neighbor_memory
@@ -711,12 +739,23 @@ class RobustAgenticMemorySystem:
                     completion_tokens_2 = usage["completion_tokens"]
 
                 else:
+                    time_start = time.time()
                     strengthen_prompt = STRENGTHEN_DETAILS_PROMPT.format(
                         content=note.content,
                         keywords=note.keywords,
                         nearest_neighbors_memories=neighbor_memory,
                     )
-                    strengthen_response, prompt_tokens_2, completion_tokens_2 = self.llm_controller.llm.get_completion_with_token(strengthen_prompt)
+                    strengthen_response, prompt_tokens_2, completion_tokens_2, usage_info, messages = self.llm_controller.llm.get_completion_with_token(strengthen_prompt)
+                    time_end = time.time()
+                    call_record = {
+                        "metadata_messages": messages,
+                        "prefix": self.llm_controller.llm.SYSTEM_MESSAGE + STRENGTHEN_DETAILS_PROMPT_PREFIX,
+                        "response": decision_response,
+                        "usage": usage_info,
+                        "time": time_end - time_start,
+                    }
+                    call_record_list.append(call_record)
+
 
                 prompt_tokens += prompt_tokens_2
                 completion_tokens += completion_tokens_2
@@ -732,8 +771,9 @@ class RobustAgenticMemorySystem:
                 if os.environ.get("FUSIONRAG", "false").lower() == "true":
                     update_response, usage, fusionrag_stats = self.llm_controller.llm.generate_response_with_fusionrag(
                         system_prompt="",
-                        prefix=UPDATE_NEIGHBORS_PROMPT_PREFIX,
+                        prefix="",
                         fusionrag_cache_list=[
+                            UPDATE_NEIGHBORS_PROMPT_PREFIX,
                             "Content: " + note.content,
                             "Context: " + note.context,
                             "Nearest neighbor memories:\n" + neighbor_memory
@@ -749,6 +789,7 @@ class RobustAgenticMemorySystem:
                     completion_tokens_3 = usage["completion_tokens"]
 
                 else:
+                    time_start = time.time()
                     update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
                         content=note.content,
                         context=note.context,
@@ -756,7 +797,17 @@ class RobustAgenticMemorySystem:
                         max_neighbor_idx=len(indices) - 1,
                         neighbor_count=len(indices),
                     )
-                    update_response, prompt_tokens_3, completion_tokens_3 = self.llm_controller.llm.get_completion_with_token(update_prompt)
+                    update_response, prompt_tokens_3, completion_tokens_3, usage_info, messages = self.llm_controller.llm.get_completion_with_token(update_prompt)
+                    time_end = time.time()
+                    call_record = {
+                        "metadata_messages": messages,
+                        "prefix": self.llm_controller.llm.SYSTEM_MESSAGE + UPDATE_NEIGHBORS_PROMPT_PREFIX,
+                        "response": update_response,
+                        "usage": usage_info,
+                        "time": time_end - time_start,
+                    }
+                    call_record_list.append(call_record)
+
 
                 prompt_tokens += prompt_tokens_3
                 completion_tokens += completion_tokens_3
@@ -777,8 +828,8 @@ class RobustAgenticMemorySystem:
                         notetmp.context = upd["context"]
                     self.memories[notes_id[memorytmp_idx]] = notetmp
 
-            return True, note, prompt_tokens, completion_tokens, fusionrag_stats_list
+            return True, note, prompt_tokens, completion_tokens, fusionrag_stats_list, call_record_list
 
         except Exception as e:
             logger.error("Evolution failed for note %s: %s — storing without evolution", note.id, e)
-            return False, note, prompt_tokens, completion_tokens, fusionrag_stats_list
+            return False, note, prompt_tokens, completion_tokens, fusionrag_stats_list, call_record_list
